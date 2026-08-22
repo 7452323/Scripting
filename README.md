@@ -2,11 +2,11 @@
 
 > 一个面向 iPhone 与 iPad 的 Scripting App 项目库。每个目录都是完整项目，按需单独导入。
 
-[![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20iPadOS-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128) [![Projects](https://img.shields.io/badge/projects-31-34C759)](Scripting/) [![Import](https://img.shields.io/badge/import-single%20project-FF9F0A)](https://scripting.fun/)
+[![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20iPadOS-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128) [![Projects](https://img.shields.io/badge/projects-31-34C759)](https://github.com/7452323/Scripting/tree/main/Scripting) [![Import](https://img.shields.io/badge/import-single%20project-FF9F0A)](https://scripting.fun/)
 
 | 快速开始 | 项目目录 | 维护规范 |
 | --- | --- | --- |
-| [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) | [浏览全部项目](Scripting/) | [查看维护规则](CONTRIBUTING.md) |
+| [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) | [浏览全部项目](https://github.com/7452323/Scripting/tree/main/Scripting) | [查看维护规则](CONTRIBUTING.md) |
 
 > 点击脚本名称会直接打开对应项目的 Scripting 导入页。页面、组件、资源、Widget 和配置会随项目一起导入。
 
@@ -16,7 +16,7 @@
 2. 从下表选择一个脚本，点击其名称导入。
 3. 回到 Scripting 运行脚本；按脚本需要授予系统权限或填写 Cookie、Token、API Key。
 
-每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting/Scripts` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
+每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting/` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
 
 ## 脚本清单
 
@@ -63,7 +63,7 @@
 ## 相关链接
 
 - [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128)
-- [打开脚本目录](Scripting/)
+- [打开脚本目录](https://github.com/7452323/Scripting/tree/main/Scripting)
 - [新增脚本规范](CONTRIBUTING.md)
 
 ## 使用前须知

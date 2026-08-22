@@ -1,13 +1,13 @@
 # 收录和维护脚本
 
-这个仓库是 Scripting 脚本的长期归档库。以后新写的 Scripting 脚本统一放到 `Scripting/Scripts/` 下，每个脚本使用一个独立目录。
+这个仓库是 Scripting 脚本的长期归档库。所有正式项目直接放在 `Scripting/项目名称/` 下，每个目录只维护一个可独立导入的项目。
 
-## 新增脚本
+## 项目结构
 
 使用下面的项目结构：
 
 ```text
-Scripting/Scripts/我的脚本/
+Scripting/我的脚本/
 ├── script.json
 ├── index.tsx
 ├── README.md
@@ -21,9 +21,9 @@ Scripting/Scripts/我的脚本/
 - `README.md`：脚本的首次使用说明和版本更新日志，必须随项目维护。
 - 其他文件：组件、页面、服务、存储、Widget、Intent 和资源文件。
 
-不要在根目录创建 `examples/` 或其他教学样例目录。仓库只收录可独立维护和导入的正式脚本项目。
+不要创建 `examples/` 或其他只用于教学的目录。仓库只收录可独立维护和导入的正式脚本项目。
 
-## README 要求
+## README 质量要求
 
 每个脚本目录必须有自己的 `README.md`，至少包含：
 
@@ -54,7 +54,7 @@ README 的最新版本条目放在最前面，并说明用户能感知到的变�
 Scripting 不支持把仓库目录内的所有脚本一次性导入。每个脚本都必须有自己的导入链接，链接指向该脚本目录：
 
 ```md
-[我的脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%2F我的脚本%22%5D)
+[我的脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FScripts%2F我的脚本%22%5D)
 ```
 
 仓库首页的脚本清单使用“脚本名 + 描述”的形式，脚本名本身就是导入链接。目录名包含中文或空格时，必须进行 URL 编码。
@@ -79,7 +79,7 @@ Scripting 不支持把仓库目录内的所有脚本一次性导入。每个脚�
 
 ## 目录和命名
 
-- 脚本放在 `Scripting/Scripts/脚本名称/`。
+- 脚本放在 `Scripting/脚本名称/`。
 - 一个脚本一个目录，不要把多个项目混在一起。
 - 目录名保持清晰稳定，避免无意义的日期或临时后缀。
 - 修改已有脚本时，尽量保留原来的目录结构和入口文件。

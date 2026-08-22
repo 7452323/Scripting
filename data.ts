@@ -3,7 +3,7 @@ import type { Repository } from './types'
 
 const API_URL = 'https://api.github.com/users/7452323/repos?per_page=100&sort=updated'
 
-const fallbackRepositories: Repository[] = [
+export const fallbackRepositories: Repository[] = [
   {
     id: 1023938396,
     name: 'QuantumultX',
@@ -37,14 +37,13 @@ const fallbackRepositories: Repository[] = [
 export async function loadRepositories(): Promise<Repository[]> {
   try {
     const response = await fetch(API_URL, {
-      headers: {
-        Accept: 'application/vnd.github+json'
-      }
+      headers: { Accept: 'application/vnd.github+json' }
     })
     if (!response.ok) throw new Error(`GitHub API ${response.status}`)
 
     const repositories = await response.json() as Repository[]
-    return repositories.filter(repository => !repository.private)
+    const publicRepositories = repositories.filter(repository => repository.private !== true)
+    return publicRepositories.length > 0 ? publicRepositories : fallbackRepositories
   } catch (error) {
     console.log('Failed to load repositories:', error)
     return fallbackRepositories

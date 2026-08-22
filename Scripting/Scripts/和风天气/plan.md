@@ -1,5 +1,7 @@
 # 和风天气小尺寸组件重新设计
 
+[安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) · [一键导入当前脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%2F%E5%92%8C%E9%A3%8E%E5%A4%A9%E6%B0%94%22%5D)
+
 ## 状态：✅ 已完成
 
 ### 完成内容

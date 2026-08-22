@@ -1,5 +1,7 @@
 # Github上传 - Upload Files to GitHub
 
+[安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) · [一键导入当前脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%2FGithub%E4%B8%8A%E4%BC%A0%22%5D)
+
 ## 项目状态
 
 - [x] 编写 `index.tsx` — GitHub 文件上传完整脚本

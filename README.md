@@ -1,22 +1,37 @@
+<div align="center">
+
 # Scripting
 
-> 一个面向 iPhone 与 iPad 的 Scripting App 项目库。每个目录都是完整项目，按需单独导入。
+### 让每一个脚本，都能被清晰发现、直接导入、持续维护
 
-[![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20iPadOS-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128) [![Projects](https://img.shields.io/badge/projects-31-34C759)](https://github.com/7452323/Scripting/tree/main/Scripting) [![Import](https://img.shields.io/badge/import-single%20project-FF9F0A)](https://scripting.fun/)
+面向 iPhone 与 iPad 的 Scripting App 项目库
 
-| 快速开始 | 项目目录 | 维护规范 |
-| --- | --- | --- |
-| [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) | [浏览全部项目](https://github.com/7452323/Scripting/tree/main/Scripting) | [查看维护规则](CONTRIBUTING.md) |
+[![平台](https://img.shields.io/badge/平台-iPhone%20%7C%20iPad-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128)
+[![项目数](https://img.shields.io/badge/项目数-31-34C759)](Scripting/)
+[![GitHub 星标](https://img.shields.io/github/stars/7452323/Scripting?style=flat&label=星标)](https://github.com/7452323/Scripting/stargazers)
+[![最近更新](https://img.shields.io/github/last-commit/7452323/Scripting?style=flat&label=最近更新)](https://github.com/7452323/Scripting/commits/main)
+[![仓库大小](https://img.shields.io/github/repo-size/7452323/Scripting?style=flat&label=仓库大小)](https://github.com/7452323/Scripting)
 
-> 点击脚本名称会直接打开对应项目的 Scripting 导入页。页面、组件、资源、Widget 和配置会随项目一起导入。
+[开始使用](#使用方式)　·　[浏览全部项目](Scripting/)　·　[维护说明](CONTRIBUTING.md)
 
-## 导入方式
+</div>
+
+> 每个项目都可以独立导入 Scripting App。点击脚本名称，直接进入对应的导入页面。
+
+| 项目事实 | 当前状态 |
+| --- | --- |
+| 收录项目 | 31 个独立 Scripting 项目 |
+| 项目位置 | `Scripting/项目名称/` |
+| 导入方式 | 单项目导入，不支持整库导入 |
+| 文档规范 | 每个项目均配有 `README.md` |
+
+## 使用方式
 
 1. 安装 [Scripting App](https://apps.apple.com/app/apple-store/id6479691128)。
 2. 从下表选择一个脚本，点击其名称导入。
 3. 回到 Scripting 运行脚本；按脚本需要授予系统权限或填写 Cookie、Token、API Key。
 
-每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting/` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
+每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting/Scripts` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
 
 ## 脚本清单
 
@@ -63,16 +78,5 @@
 ## 相关链接
 
 - [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128)
-- [打开脚本目录](https://github.com/7452323/Scripting/tree/main/Scripting)
+- [打开脚本目录](Scripting/)
 - [新增脚本规范](CONTRIBUTING.md)
-
-## 使用前须知
-
-- 部分项目会请求相册、联系人、定位、通知、文件或网络权限；请在理解用途后再授权。
-- 涉及 Token、Cookie、API Key 或账号登录时，仅填写你自己拥有且有权使用的凭据。
-- 项目内的 `README.md` 包含首次使用、配置要求、注意事项与版本更新。
-- 第三方服务和内容的可用性由其自身决定，请遵守服务条款、内容授权和当地法律。
-
----
-
-<p align="center"><a href="Scripting/">全部项目</a> · <a href="CONTRIBUTING.md">维护规范</a> · <a href="https://apps.apple.com/app/apple-store/id6479691128">Scripting App</a></p>

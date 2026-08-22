@@ -1,9 +1,18 @@
 # 视频解析下载
 
-[安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) · [一键导入当前脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%2F%E8%A7%86%E9%A2%91%E8%A7%A3%E6%9E%90%E4%B8%8B%E8%BD%BD%22%5D)
+## 用途
+多平台媒体解析与下载工具，支持抖音、Twitter/X、小红书、Instagram 和 Bilibili，解析视频或图片链接后保存到相册或分享。
 
-iOS 去水印解析工具 — 在 Scripting App 中运行。
+## 首次使用
+1. 从目标平台复制公开视频或图文链接。
+2. 导入并运行脚本，将链接粘贴到输入框。
+3. 等待解析完成，选择视频画质或图片资源。
+4. 保存到相册或使用系统分享。
 
-支持：抖音 / Twitter/X / 小红书 / Instagram / Bilibil
+## 注意事项
+平台接口和链接格式可能变化；请只下载你有权保存的内容，不要用于绕过付费、隐私或访问控制。
 
-UI太丑-这刁毛完善了下-imbbbbb
+## 版本更新
+### 1.0.0
+- 首次收录。
+- 支持多个平台的链接解析、媒体选择、相册保存和分享。

@@ -31,7 +31,7 @@
 2. 从下表选择一个脚本，点击其名称导入。
 3. 回到 Scripting 运行脚本；按脚本需要授予系统权限或填写 Cookie、Token、API Key。
 
-每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting/Scripts` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
+每个链接只对应一个脚本项目。Scripting 不支持一次导入整个 `Scripting` 目录；项目中的页面、服务、资源和 Widget 会随该项目一同导入。
 
 ## 脚本清单
 

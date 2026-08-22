@@ -1,0 +1,45 @@
+{
+  "permissions" : null,
+  "author" : {
+    "name" : "7452323",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "email" : "7452323@gmail.com"
+  },
+  "intentInputTypes" : [
+
+  ],
+  "contributors" : [
+
+  ],
+  "name" : "App Store限免",
+  "iconImage" : null,
+  "color" : "rgba(102, 196, 235,1)",
+  "description" : null,
+  "runInApp" : false,
+  "icon" : "square.2.layers.3d.fill",
+  "version" : "1.0.0",
+  "entry" : "index.tsx",
+  "remoteResource" : null,
+  "localizedNames" : {
+    "fr" : "",
+    "de" : "",
+    "ja" : "",
+    "pt" : "",
+    "es" : "",
+    "ru" : "",
+    "it" : "",
+    "zh" : "",
+    "en" : ""
+  },
+  "localizedDescriptions" : {
+    "fr" : "",
+    "de" : "",
+    "ja" : "",
+    "pt" : "",
+    "es" : "",
+    "ru" : "",
+    "it" : "",
+    "zh" : "",
+    "en" : ""
+  }
+}

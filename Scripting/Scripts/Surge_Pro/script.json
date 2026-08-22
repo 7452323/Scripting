@@ -1,0 +1,49 @@
+{
+  "intentInputTypes" : [
+
+  ],
+  "description" : "原生 Scripting 版 Surge Core 状态、流量与策略组监控面板",
+  "localizedDescriptions" : {
+    "en" : "",
+    "ja" : "",
+    "zh" : "",
+    "fr" : "",
+    "de" : "",
+    "pt" : "",
+    "ru" : "",
+    "es" : "",
+    "it" : ""
+  },
+  "iconImage" : null,
+  "contributors" : [
+
+  ],
+  "name" : "Surge_Pro",
+  "color" : "rgba(174, 109, 216,1)",
+  "runInApp" : true,
+  "entry" : "index.tsx",
+  "icon" : "square.2.layers.3d.fill",
+  "remoteResource" : {
+    "hash" : "3b9b6fdfd506d85a6bbbc23eeae98451",
+    "autoUpdateInterval" : null,
+    "url" : "https:\/\/github.com\/7452323\/QuantumultX\/tree\/main\/Scripting\/Scripts\/Surge_Panel"
+  },
+  "version" : "1.5.1",
+  "localizedNames" : {
+    "es" : "",
+    "ja" : "",
+    "pt" : "",
+    "en" : "",
+    "fr" : "",
+    "ru" : "",
+    "de" : "",
+    "zh" : "",
+    "it" : ""
+  },
+  "permissions" : null,
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "name" : "7452323",
+    "homepage" : null
+  }
+}

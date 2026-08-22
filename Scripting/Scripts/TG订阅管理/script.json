@@ -1,0 +1,41 @@
+{
+  "contributors" : [
+
+  ],
+  "version" : "1.0.0",
+  "localizedDescriptions" : {
+    "es" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "",
+    "it" : "",
+    "en" : "",
+    "fr" : "",
+    "ja" : "",
+    "de" : ""
+  },
+  "remoteResource" : null,
+  "icon" : "location.fill",
+  "iconImage" : "https:\/\/raw.githubusercontent.com\/7452323\/QuantumultX\/main\/icon\/Telegram%20Scripting.png",
+  "author" : null,
+  "color" : "rgba(28, 140, 255,1)",
+  "description" : "查看频道粉丝数量的小组件",
+  "permissions" : null,
+  "name" : "TG订阅管理",
+  "runInApp" : false,
+  "entry" : "index.tsx",
+  "intentInputTypes" : [
+
+  ],
+  "localizedNames" : {
+    "fr" : "",
+    "en" : "",
+    "es" : "",
+    "de" : "",
+    "zh" : "",
+    "ja" : "",
+    "ru" : "",
+    "pt" : "",
+    "it" : ""
+  }
+}

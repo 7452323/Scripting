@@ -1,0 +1,33 @@
+{
+  "iconImage" : null,
+  "intentInputTypes" : [],
+  "localizedDescriptions" : {
+    "en" : "",
+    "ja" : "",
+    "it" : "",
+    "ru" : "",
+    "pt" : "",
+    "es" : "",
+    "zh" : "显示生日倒数、农历、年龄、相识纪念日和每日一言",
+    "de" : "",
+    "fr" : ""
+  },
+  "icon" : "birthday.cake.fill",
+  "version" : "1.0.0",
+  "localizedNames" : {
+    "en" : "Birthday Widget",
+    "ja" : "",
+    "it" : "",
+    "ru" : "",
+    "pt" : "",
+    "es" : "",
+    "zh" : "破壳日",
+    "de" : "",
+    "fr" : ""
+  },
+  "runInApp" : false,
+  "remoteResource" : null,
+  "color" : "rgba(252, 94, 173, 1)",
+  "description" : "显示生日倒数、农历、年龄、相识纪念日和每日一言",
+  "name" : "生日"
+}

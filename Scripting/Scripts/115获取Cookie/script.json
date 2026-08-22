@@ -1,0 +1,45 @@
+{
+  "contributors" : [
+
+  ],
+  "entry" : "index.tsx",
+  "icon" : "square.2.layers.3d.fill",
+  "remoteResource" : null,
+  "runInApp" : false,
+  "version" : "1.0.0",
+  "description" : null,
+  "localizedNames" : {
+    "ru" : "",
+    "pt" : "",
+    "ja" : "",
+    "zh" : "",
+    "es" : "",
+    "de" : "",
+    "it" : "",
+    "en" : "",
+    "fr" : ""
+  },
+  "localizedDescriptions" : {
+    "ru" : "",
+    "pt" : "",
+    "ja" : "",
+    "zh" : "",
+    "es" : "",
+    "de" : "",
+    "it" : "",
+    "en" : "",
+    "fr" : ""
+  },
+  "permissions" : null,
+  "iconImage" : null,
+  "color" : "rgba(174, 109, 216,1)",
+  "intentInputTypes" : [
+
+  ],
+  "name" : "115获取Cookie",
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "name" : "7452323",
+    "homepage" : "https:\/\/github.com\/7452323"
+  }
+}

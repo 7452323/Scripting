@@ -1,0 +1,44 @@
+{
+  "iconImage" : null,
+  "localizedNames" : {
+    "pt" : "",
+    "it" : "",
+    "es" : "",
+    "zh" : "TMP.link",
+    "de" : "",
+    "en" : "TMP.link",
+    "ja" : "",
+    "ru" : "",
+    "fr" : ""
+  },
+  "runInApp" : true,
+  "color" : "#0a84ff",
+  "author" : {
+    "email" : null,
+    "homepage" : null,
+    "name" : "7452323"
+  },
+  "description" : "安全、快速的临时文件分享服务",
+  "intentInputTypes" : [
+
+  ],
+  "localizedDescriptions" : {
+    "pt" : "",
+    "it" : "",
+    "es" : "",
+    "zh" : "安全、快速的临时文件分享服务，支持局域网内高速传输",
+    "de" : "",
+    "en" : "Secure, fast temporary file sharing service",
+    "ja" : "",
+    "ru" : "",
+    "fr" : ""
+  },
+  "contributors" : [
+
+  ],
+  "icon" : "link.circle.fill",
+  "remoteResource" : null,
+  "name" : "TMP.link",
+  "version" : "1.0.0",
+  "entry" : "index.tsx"
+}

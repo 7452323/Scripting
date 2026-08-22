@@ -1,0 +1,45 @@
+{
+  "entry" : "index.tsx",
+  "author" : {
+    "name" : "7452323",
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323"
+  },
+  "remoteResource" : null,
+  "contributors" : [
+
+  ],
+  "permissions" : null,
+  "localizedNames" : {
+    "de" : "",
+    "en" : "",
+    "fr" : "",
+    "it" : "",
+    "ja" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "",
+    "es" : ""
+  },
+  "description" : null,
+  "runInApp" : false,
+  "name" : "MoonTVPlua",
+  "localizedDescriptions" : {
+    "de" : "",
+    "en" : "",
+    "fr" : "",
+    "it" : "",
+    "ja" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "",
+    "es" : ""
+  },
+  "color" : "rgba(174, 109, 216,1)",
+  "icon" : "square.2.layers.3d.fill",
+  "intentInputTypes" : [
+
+  ],
+  "version" : "1.0.0",
+  "iconImage" : null
+}

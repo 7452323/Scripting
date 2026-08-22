@@ -1,0 +1,48 @@
+{
+  "version" : "1.0.0",
+  "iconImage" : "https:\/\/raw.githubusercontent.com\/7452323\/QuantumultX\/main\/icon\/PulseNet2.png",
+  "localizedDescriptions" : {
+    "zh" : "网络测速、设备信息、数据监控与抢票时间工具",
+    "ja" : "ネットワーク速度測定、デバイス情報、データ監視、チケット時計ツール。",
+    "ru" : "Тест сети, сведения об устройстве, мониторинг данных и часы для покупки билетов.",
+    "en" : "Network speed testing, device information, data monitoring, and ticket clock tools.",
+    "pt" : "Teste de rede, informações do dispositivo, monitoramento de dados e relógio de ingressos.",
+    "it" : "Test di rete, informazioni sul dispositivo, monitoraggio dati e orologio per biglietti.",
+    "de" : "Netzwerktest, Geräteinformationen, Datenüberwachung und Ticket-Uhr.",
+    "es" : "Prueba de red, información del dispositivo, supervisión de datos y reloj para entradas.",
+    "fr" : "Test réseau, informations sur l’appareil, surveillance des données et horloge de billetterie."
+  },
+  "contributors" : [
+
+  ],
+  "author" : {
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323",
+    "email" : "7452323@gmail.com"
+  },
+  "description" : "网络测速、设备信息、数据监控与抢票时间工具",
+  "icon" : "square.2.layers.3d.fill",
+  "remoteResource" : null,
+  "runInApp" : false,
+  "permissions" : [
+    "photos",
+    "fileSystem"
+  ],
+  "localizedNames" : {
+    "ja" : "PulseNet",
+    "pt" : "PulseNet",
+    "it" : "PulseNet",
+    "fr" : "PulseNet",
+    "zh" : "PulseNet",
+    "es" : "PulseNet",
+    "de" : "PulseNet",
+    "ru" : "PulseNet",
+    "en" : "PulseNet"
+  },
+  "entry" : "index.tsx",
+  "color" : "rgba(124, 76, 179,1)",
+  "name" : "PulseNet",
+  "intentInputTypes" : [
+
+  ]
+}

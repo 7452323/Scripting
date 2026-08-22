@@ -1,0 +1,45 @@
+{
+  "author" : {
+    "homepage" : "https:\/\/github.com\/7452323",
+    "email" : "7452323@gmail.com",
+    "name" : "7452323"
+  },
+  "icon" : "square.2.layers.3d.fill",
+  "description" : null,
+  "runInApp" : false,
+  "remoteResource" : null,
+  "color" : "rgba(230, 190, 1,1)",
+  "iconImage" : null,
+  "version" : "1.0.0",
+  "entry" : "index.tsx",
+  "intentInputTypes" : [
+
+  ],
+  "localizedNames" : {
+    "it" : "",
+    "es" : "",
+    "en" : "",
+    "ja" : "",
+    "ru" : "",
+    "pt" : "",
+    "zh" : "",
+    "de" : "",
+    "fr" : ""
+  },
+  "permissions" : null,
+  "contributors" : [
+
+  ],
+  "name" : "联系人管理器",
+  "localizedDescriptions" : {
+    "it" : "",
+    "es" : "",
+    "en" : "",
+    "ja" : "",
+    "ru" : "",
+    "pt" : "",
+    "zh" : "",
+    "de" : "",
+    "fr" : ""
+  }
+}

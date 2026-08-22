@@ -1,0 +1,48 @@
+{
+  "localizedDescriptions" : {
+    "en" : "",
+    "es" : "",
+    "zh" : "",
+    "de" : "",
+    "pt" : "",
+    "it" : "",
+    "ja" : "",
+    "fr" : "",
+    "ru" : ""
+  },
+  "author" : {
+    "homepage" : null,
+    "name" : "7452323",
+    "email" : null
+  },
+  "localizedNames" : {
+    "en" : "",
+    "zh" : "",
+    "it" : "",
+    "es" : "",
+    "fr" : "",
+    "pt" : "",
+    "de" : "",
+    "ru" : "",
+    "ja" : ""
+  },
+  "entry" : "index.tsx",
+  "color" : "rgba(71, 102, 194,1)",
+  "intentInputTypes" : [
+
+  ],
+  "description" : "",
+  "contributors" : [
+
+  ],
+  "runInApp" : false,
+  "icon" : "square.2.layers.3d.fill",
+  "iconImage" : "",
+  "name" : "Hegre",
+  "version" : "1.0.0",
+  "remoteResource" : {
+    "url" : "https:\/\/github.com\/7452323\/QuantumultX\/tree\/main\/Scripting\/Hegre",
+    "autoUpdateInterval" : null,
+    "hash" : "b2616582167d0b2f0e0ee020a878ab97"
+  }
+}

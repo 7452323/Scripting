@@ -1,0 +1,29 @@
+{
+  "icon" : "magnifyingglass",
+  "author" : {
+    "homepage" : null,
+    "name" : "Scripting Agent",
+    "email" : null
+  },
+  "version" : "1.0.0",
+  "entry" : "index.tsx",
+  "name" : "app-search",
+  "runInApp" : false,
+  "contributors" : [
+
+  ],
+  "remoteResource" : null,
+  "localizedDescriptions" : {
+    "zh" : "搜索 App Store 应用，查看详情、复制 Bundle ID"
+  },
+  "permissions" : null,
+  "intentInputTypes" : [
+    "texts"
+  ],
+  "color" : "rgba(10, 132, 255, 1)",
+  "localizedNames" : {
+    "zh" : "App 搜索"
+  },
+  "iconImage" : null,
+  "description" : "搜索 App Store 应用 — 查看详情、复制 Bundle ID"
+}

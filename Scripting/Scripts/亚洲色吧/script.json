@@ -1,0 +1,44 @@
+{
+  "iconImage" : "",
+  "contributors" : [
+
+  ],
+  "icon" : "headphones",
+  "version" : "1.0.0",
+  "localizedNames" : {
+    "zh" : "",
+    "en" : "",
+    "ru" : "",
+    "pt" : "",
+    "es" : "",
+    "fr" : "",
+    "it" : "",
+    "de" : "",
+    "ja" : ""
+  },
+  "entry" : "index.tsx",
+  "description" : "",
+  "name" : "亚洲色吧",
+  "runInApp" : false,
+  "remoteResource" : null,
+  "color" : "rgba(230, 190, 1,1)",
+  "author" : {
+    "email" : null,
+    "homepage" : null,
+    "name" : "7452323"
+  },
+  "localizedDescriptions" : {
+    "zh" : "",
+    "pt" : "",
+    "de" : "",
+    "fr" : "",
+    "ja" : "",
+    "it" : "",
+    "en" : "",
+    "es" : "",
+    "ru" : ""
+  },
+  "intentInputTypes" : [
+
+  ]
+}

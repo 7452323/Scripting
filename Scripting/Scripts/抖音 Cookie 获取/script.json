@@ -1,0 +1,13 @@
+{
+  "name": "抖音 Cookie 获取",
+  "description": "登录抖音并提取经过校验的 Cookie",
+  "icon": "key.fill",
+  "color": "rgba(255, 45, 85, 1)",
+  "version": "1.1.0",
+  "runInApp": false,
+  "entry": "index.tsx",
+  "author": {
+    "name": "7452323",
+    "homepage": "https://github.com/7452323"
+  }
+}

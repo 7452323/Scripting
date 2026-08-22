@@ -1,0 +1,45 @@
+{
+  "color" : "rgba(51, 51, 51, 1)",
+  "intentInputTypes" : [
+
+  ],
+  "author" : null,
+  "version" : "1.0.0",
+  "runInApp" : true,
+  "iconImage" : null,
+  "contributors" : [
+
+  ],
+  "localizedNames" : {
+    "zh" : "",
+    "ru" : "",
+    "es" : "",
+    "en" : "",
+    "it" : "",
+    "de" : "",
+    "fr" : "",
+    "ja" : "",
+    "pt" : ""
+  },
+  "localizedDescriptions" : {
+    "pt" : "",
+    "zh" : "",
+    "de" : "",
+    "ja" : "",
+    "it" : "",
+    "ru" : "",
+    "fr" : "",
+    "en" : "",
+    "es" : ""
+  },
+  "icon" : "doc.text.fill",
+  "name" : "Gist客户端",
+  "permissions" : null,
+  "remoteResource" : {
+    "autoUpdateInterval" : 600,
+    "hash" : "03ae4d0be5d4941bbc9b886d4e4e2aca",
+    "url" : "https:\/\/github.com\/7452323\/QuantumultX\/tree\/main\/Scripting\/Scripts\/Gist%E5%AE%A2%E6%88%B7%E7%AB%AF"
+  },
+  "description" : "GitHub Gist 私密仓库管理器 - 列出\/创建\/编辑\/删除 Gist",
+  "entry" : "index.tsx"
+}

@@ -1,0 +1,45 @@
+{
+  "description" : null,
+  "contributors" : [
+
+  ],
+  "name" : "Gist",
+  "color" : "rgba(28, 140, 255,1)",
+  "iconImage" : null,
+  "runInApp" : false,
+  "icon" : "link",
+  "intentInputTypes" : [
+
+  ],
+  "entry" : "index.tsx",
+  "version" : "1.0.0",
+  "remoteResource" : null,
+  "author" : {
+    "homepage" : "https:\/\/github.com\/001ProMax",
+    "email" : null,
+    "name" : "001"
+  },
+  "localizedNames" : {
+    "en" : "",
+    "it" : "",
+    "es" : "",
+    "zh" : "",
+    "ja" : "",
+    "fr" : "",
+    "de" : "",
+    "ru" : "",
+    "pt" : ""
+  },
+  "permissions" : null,
+  "localizedDescriptions" : {
+    "ru" : "",
+    "fr" : "",
+    "en" : "",
+    "ja" : "",
+    "es" : "",
+    "de" : "",
+    "it" : "",
+    "pt" : "",
+    "zh" : ""
+  }
+}

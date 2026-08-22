@@ -1,0 +1,18 @@
+{
+  "name": "中文成人文学网",
+  "entry": "index.tsx",
+  "version": "1.0.0",
+  "author": {
+    "name": "Echo"
+  },
+  "description": "从 blog.xbookcn.net 和 book.xbookcn.net 下载成人情色小说",
+  "localizedDescriptions": {
+    "zh": "从 blog.xbookcn.net 和 book.xbookcn.net 下载成人情色小说，支持分类浏览、选择下载、导出为文本文件。"
+  },
+  "localizedNames": {
+    "zh": "xbookcn 电子书下载器"
+  },
+  "icon": "square.2.layers.3d.fill",
+  "color": "rgba(71, 102, 194,1)",
+  "runInApp": true
+}

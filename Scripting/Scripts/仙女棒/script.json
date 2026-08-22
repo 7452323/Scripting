@@ -1,0 +1,24 @@
+{
+  "entry" : "index.tsx",
+  "color" : "rgba(0, 198, 165,1)",
+  "runInApp" : false,
+  "author" : {
+    "name" : "Echo",
+    "email" : null,
+    "homepage" : null
+  },
+  "description" : "这漫漫长夜……\n\n主人的手指终于落在了这不存在的第七档。",
+  "version" : "1.0.0",
+  "localizedNames" : {
+    "ja" : "","en" : "","zh" : "","fr" : "","it" : "","de" : "","es" : "","ru" : "","pt" : ""
+  },
+  "iconImage" : "https:\/\/raw.githubusercontent.com\/Reviewa\/QuantumultX\/main\/icon\/小仙女棒.png",
+  "icon" : "sparkles",
+  "intentInputTypes" : [],
+  "name" : "仙女棒",
+  "remoteResource" : null,
+  "localizedDescriptions" : {
+    "zh" : "","ja" : "","pt" : "","en" : "","it" : "","fr" : "","es" : "","ru" : "","de" : ""
+  },
+  "contributors" : []
+}

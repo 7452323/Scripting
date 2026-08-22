@@ -1,0 +1,40 @@
+{
+  "localizedDescriptions" : {
+    "fr" : "",
+    "es" : "",
+    "zh" : "",
+    "ja" : "",
+    "it" : "",
+    "ru" : "",
+    "pt" : "",
+    "en" : "",
+    "de" : ""
+  },
+  "runInApp" : true,
+  "name" : "和风天气",
+  "entry" : "index.tsx",
+  "author" : null,
+  "intentInputTypes" : [
+
+  ],
+  "iconImage" : null,
+  "contributors" : [
+
+  ],
+  "icon" : "cloud.rain.fill",
+  "description" : null,
+  "localizedNames" : {
+    "fr" : "",
+    "es" : "",
+    "zh" : "",
+    "ja" : "",
+    "it" : "",
+    "ru" : "",
+    "pt" : "",
+    "en" : "",
+    "de" : ""
+  },
+  "version" : "1.0.0",
+  "remoteResource" : null,
+  "color" : "rgba(252, 124, 93,1)"
+}

@@ -1,0 +1,49 @@
+{
+  "description" : null,
+  "runInApp" : false,
+  "entry" : "index.tsx",
+  "author" : {
+    "name" : "7452323",
+    "email" : null,
+    "homepage" : null
+  },
+  "remoteResource" : {
+    "autoUpdateInterval" : null,
+    "url" : "https:\/\/github.com\/imbbbbb\/jiaoben\/tree\/master\/%E5%BF%AB%E6%8D%B7%E4%B8%8B%E8%BD%BD",
+    "hash" : "29406cdcd93b75d2620f669ac92f2300"
+  },
+  "icon" : "stamp.fill",
+  "name" : "视频解析下载",
+  "contributors" : [
+
+  ],
+  "color" : "rgba(233, 123, 199,1)",
+  "localizedNames" : {
+    "zh" : "",
+    "fr" : "",
+    "ja" : "",
+    "ru" : "",
+    "it" : "",
+    "de" : "",
+    "es" : "",
+    "pt" : "",
+    "en" : ""
+  },
+  "localizedDescriptions" : {
+    "de" : "",
+    "zh" : "",
+    "ja" : "",
+    "fr" : "",
+    "ru" : "",
+    "es" : "",
+    "pt" : "",
+    "it" : "",
+    "en" : ""
+  },
+  "iconImage" : null,
+  "permissions" : null,
+  "version" : "1.0.0",
+  "intentInputTypes" : [
+
+  ]
+}

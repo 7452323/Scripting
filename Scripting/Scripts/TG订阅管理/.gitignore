@@ -1,0 +1,20 @@
+# Scripting 项目 — 不要提交 iCloud 元数据和系统垃圾
+
+# macOS / Finder
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+._*
+
+# iCloud
+*.icloud
+
+# Thumbnails
+Icon?
+
+# Files that might be locked/temporary
+*~
+
+# 项目本地配置（非共享）
+*.local.*

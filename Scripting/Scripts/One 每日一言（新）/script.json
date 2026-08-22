@@ -1,0 +1,45 @@
+{
+  "icon" : "square.2.layers.3d.fill",
+  "description" : "致敬韩寒🫡",
+  "permissions" : null,
+  "contributors" : [
+
+  ],
+  "name" : "One 每日一言（新）",
+  "author" : {
+    "email" : null,
+    "homepage" : null,
+    "name" : "7452323"
+  },
+  "remoteResource" : null,
+  "color" : "rgba(124, 76, 179,1)",
+  "intentInputTypes" : [
+
+  ],
+  "localizedNames" : {
+    "zh" : "",
+    "ja" : "",
+    "pt" : "",
+    "en" : "",
+    "ru" : "",
+    "it" : "",
+    "de" : "",
+    "fr" : "",
+    "es" : ""
+  },
+  "version" : "1.0.0",
+  "entry" : "index.tsx",
+  "iconImage" : "https:\/\/raw.githubusercontent.com\/7452323\/QuantumultX\/main\/icon\/one2.png",
+  "localizedDescriptions" : {
+    "zh" : "",
+    "pt" : "",
+    "fr" : "",
+    "es" : "",
+    "en" : "",
+    "ru" : "",
+    "ja" : "",
+    "de" : "",
+    "it" : ""
+  },
+  "runInApp" : true,
+}

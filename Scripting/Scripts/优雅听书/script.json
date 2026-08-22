@@ -1,0 +1,31 @@
+{
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323"
+  },
+  "runInApp" : false,
+  "version" : "1.3.6",
+  "name" : "优雅听书",
+  "icon" : "book.fill",
+  "entry" : "index.tsx",
+  "remoteResource" : null,
+  "iconImage" : null,
+  "color" : "rgba(71, 102, 194, 1.00)",
+  "localizedNames" : {
+    "zh" : "优雅听书",
+    "en" : "LRTS Audiobook"
+  },
+  "intentInputTypes" : [
+
+  ],
+  "contributors" : [
+
+  ],
+  "localizedDescriptions" : {
+    "zh" : "优雅听书聚合播放器",
+    "en" : "LRTS Audiobook Player"
+  },
+  "permissions" : null,
+  "description" : "优雅听书聚合播放器"
+}

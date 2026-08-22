@@ -1,0 +1,1 @@
+{"runInApp":false,"localizedNames":{},"name":"负一屏低栏","remoteResource":null,"icon":"rectangle.bottomthird.inset.filled","intentInputTypes":[],"color":"rgba(140, 124, 255, 1)","version":"1.0.0","entry":"index.tsx","description":"负一屏底部小组件，显示天气与每日一句。","iconImage":null,"localizedDescriptions":{},"contributors":[]}

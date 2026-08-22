@@ -1,0 +1,45 @@
+{
+  "icon" : "square.2.layers.3d.fill",
+  "runInApp" : false,
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323"
+  },
+  "permissions" : null,
+  "iconImage" : null,
+  "name" : "每日图文",
+  "localizedNames" : {
+    "ja" : "",
+    "zh" : "",
+    "en" : "",
+    "de" : "",
+    "fr" : "",
+    "es" : "",
+    "ru" : "",
+    "pt" : "",
+    "it" : ""
+  },
+  "description" : "每日图文 — 随机背景图片 + 文字句子，支持小号/中号/大号三种尺寸小组件",
+  "color" : "rgba(124, 76, 179,1)",
+  "remoteResource" : null,
+  "entry" : "index.tsx",
+  "intentInputTypes" : [
+
+  ],
+  "version" : "1.0.0",
+  "contributors" : [
+
+  ],
+  "localizedDescriptions" : {
+    "ja" : "",
+    "zh" : "",
+    "en" : "",
+    "de" : "",
+    "fr" : "",
+    "es" : "",
+    "ru" : "",
+    "pt" : "",
+    "it" : ""
+  }
+}

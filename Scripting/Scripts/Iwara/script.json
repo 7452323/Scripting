@@ -1,0 +1,45 @@
+{
+  "icon" : "square.2.layers.3d.fill",
+  "remoteResource" : null,
+  "localizedNames" : {
+    "ja" : "",
+    "fr" : "",
+    "it" : "",
+    "es" : "",
+    "ru" : "",
+    "pt" : "",
+    "zh" : "",
+    "en" : "",
+    "de" : ""
+  },
+  "contributors" : [
+
+  ],
+  "color" : "rgba(238, 92, 98,1)",
+  "localizedDescriptions" : {
+    "ja" : "",
+    "fr" : "",
+    "it" : "",
+    "es" : "",
+    "ru" : "",
+    "pt" : "",
+    "zh" : "",
+    "en" : "",
+    "de" : ""
+  },
+  "name" : "iwara",
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323"
+  },
+  "runInApp" : false,
+  "permissions" : null,
+  "entry" : "index.tsx",
+  "intentInputTypes" : [
+
+  ],
+  "description" : null,
+  "version" : "1.0.0",
+  "iconImage" : null
+}

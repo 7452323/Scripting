@@ -1,0 +1,45 @@
+{
+  "icon" : "paintpalette",
+  "entry" : "index.tsx",
+  "description" : "Pornhub \/ OnlyFans 风格 Logo 生成器 —— 实时预览、自定义配色与字号、一键导出 PNG \/ SVG。灵感来自 bestony\/logoly。",
+  "name" : "Logoly",
+  "permissions" : null,
+  "localizedNames" : {
+    "pt" : "",
+    "ja" : "",
+    "en" : "",
+    "de" : "",
+    "ru" : "",
+    "it" : "",
+    "zh" : "Logoly",
+    "fr" : "",
+    "es" : ""
+  },
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323"
+  },
+  "color" : "rgba(255, 153, 0, 1)",
+  "runInApp" : false,
+  "version" : "1.0.0",
+  "localizedDescriptions" : {
+    "es" : "",
+    "it" : "",
+    "en" : "",
+    "pt" : "",
+    "de" : "",
+    "zh" : "Pornhub \/ OnlyFans 风格 Logo 生成器：实时预览、自定义配色与字号、导出 PNG \/ SVG。",
+    "ja" : "",
+    "ru" : "",
+    "fr" : ""
+  },
+  "contributors" : [
+
+  ],
+  "iconImage" : null,
+  "remoteResource" : null,
+  "intentInputTypes" : [
+
+  ]
+}

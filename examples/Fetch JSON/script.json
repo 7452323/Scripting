@@ -1,0 +1,9 @@
+{
+  "entry": "index.tsx",
+  "name": "Fetch JSON",
+  "icon": "arrow.down.circle.fill",
+  "color": "rgba(52, 199, 89, 1)",
+  "version": "1.0.0",
+  "runInApp": false,
+  "description": "请求一个 JSON 地址并显示结果"
+}

@@ -1,0 +1,9 @@
+{
+  "entry": "index.tsx",
+  "name": "Hello Scripting",
+  "icon": "hand.wave.fill",
+  "color": "rgba(10, 132, 255, 1)",
+  "version": "1.0.0",
+  "runInApp": false,
+  "description": "Scripting 最小可运行示例"
+}

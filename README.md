@@ -1,31 +1,42 @@
 # Scripting Script Library
 
-一个用于浏览 `7452323` GitHub 公开仓库的 Scripting App 脚本库。
+这里是我个人整理的 Scripting App 脚本仓库。
 
-## 功能
+## 怎么用
 
-- 从 GitHub 公共 API 加载账号下的公开仓库
-- 按仓库名称、描述和主要语言搜索
-- 按最近更新或 Star 数排序
-- 查看仓库详情、语言、Star 和更新时间
-- 在 Scripting App 内打开 GitHub 仓库页面
-- 网络不可用时使用内置示例数据
+这个仓库本身不是一个需要运行的 Scripting 项目，不要把仓库根目录直接运行。
 
-## 安装
+使用某个脚本时：
 
-将 `Scripting Script Library` 目录导入 Scripting App，或把本目录中的脚本文件放入 Scripting 的脚本目录。
+1. 打开对应目录。
+2. 阅读该目录里的 `README.md`。
+3. 下载或复制这个脚本目录到 Scripting App 的脚本目录。
+4. 在 Scripting App 中运行该脚本。
 
-## 结构
+每个可运行脚本都应当是一个独立目录，通常包含：
 
-- `script.json`：Scripting 脚本元数据
-- `index.tsx`：脚本入口与界面
-- `types.ts`：仓库数据类型
-- `data.ts`：GitHub API 请求和 fallback 数据
+```text
+脚本名称/
+├── script.json
+├── index.tsx
+└── 其他 .ts 或 .tsx 文件
+```
 
-## 数据来源
+## 目录
 
-数据来自 GitHub 公共 API：
+- `examples/`：最小示例和通用模板
+- `widgets/`：主屏幕小组件
+- `intents/`：快捷指令、分享面板入口
+- `tools/`：日常工具脚本
 
-`https://api.github.com/users/7452323/repos?per_page=100&sort=updated`
+## 添加脚本
 
-本项目仅展示公开仓库信息，仓库内容和许可证归原作者所有。
+新建一个独立目录，不要把多个脚本的文件混在仓库根目录：
+
+```text
+examples/My Script/script.json
+examples/My Script/index.tsx
+examples/My Script/README.md
+```
+
+脚本应尽量使用 Scripting 官方 API，敏感信息、Token、Cookie 和本地路径不要提交到 GitHub。

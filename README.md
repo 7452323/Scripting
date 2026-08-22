@@ -2,9 +2,19 @@
 
 > 个人 Scripting App 脚本库，集中保存、整理和分享可直接导入 Scripting 的脚本项目。
 
-[![Scripting](https://img.shields.io/badge/Scripting-iOS%20%7C%20iPadOS-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/cn/app/scripting/id6479691128)
+[![Scripting](https://img.shields.io/badge/Scripting-iOS%20%7C%20iPadOS-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128)
 [![Scripts](https://img.shields.io/badge/scripts-166-34C759)](Scripting/Scripts/)
 [![License](https://img.shields.io/badge/license-personal-lightgrey)](#)
+
+## 开始使用
+
+| 操作 | 入口 |
+| --- | --- |
+| 尚未安装 Scripting | [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) |
+| 一次导入全部脚本 | [一键导入脚本库](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%22%5D) |
+| 浏览并选择脚本 | [打开脚本目录](Scripting/Scripts/) |
+
+在 iPhone 或 iPad 上点击“**一键导入脚本库**”，Scripting 会打开导入页面并读取本仓库的 `Scripting/Scripts` 目录。首次使用请先点击“**安装 Scripting App**”。
 
 ## 这里有什么
 
@@ -12,12 +22,11 @@
 
 脚本来源于旧仓库 [`QuantumultX/Scripting/Scripts`](https://github.com/7452323/QuantumultX/tree/main/Scripting/Scripts)，后续新写的 Scripting 脚本也统一放在这里。
 
-## 快速使用
+## 导入单个脚本
 
-1. 在 [`Scripting/Scripts`](Scripting/Scripts/) 中找到需要的脚本目录。
-2. 打开脚本目录里的 `README.md`，先确认用途、权限和配置要求。
-3. 下载整个脚本目录，或在 GitHub 中逐个下载项目文件。
-4. 将完整目录放入 Scripting 的脚本目录中，在 Scripting App 内运行。
+1. 在 [`Scripting/Scripts`](Scripting/Scripts/) 中打开需要的脚本目录。
+2. 阅读脚本目录中的 `README.md`，确认用途、权限和配置要求。
+3. 点击该 README 提供的“**一键导入**”链接；没有链接时，可从目录页使用 Scripting 的导入入口。
 
 不要只下载 `index.tsx`。很多项目依赖同目录下的 `script.json`、其他 `.ts/.tsx` 文件和资源文件。
 
@@ -38,7 +47,7 @@ Scripting-Script-Library/
 我的脚本/
 ├── script.json        # Scripting 项目配置
 ├── index.tsx          # 普通运行入口
-├── README.md          # 用途、配置和使用说明
+├── README.md          # 用途、配置和一键导入链接
 └── components/        # 可选：组件、页面、服务和资源
 ```
 
@@ -52,7 +61,7 @@ Scripting-Script-Library/
 Scripting/Scripts/脚本名称/
 ```
 
-每个脚本使用独立目录，目录名使用清晰、稳定的脚本名称。新增脚本时尽量同时提供项目说明；有配置项、权限请求或外部服务依赖的项目，必须在说明中写清楚。
+每个脚本使用独立目录，目录名使用清晰、稳定的脚本名称。新增脚本时尽量同时提供项目说明和一键导入链接；有配置项、权限请求或外部服务依赖的项目，必须在说明中写清楚。
 
 ## 注意事项
 
@@ -63,6 +72,7 @@ Scripting/Scripts/脚本名称/
 
 ## 相关链接
 
-- [Scripting App](https://apps.apple.com/cn/app/scripting/id6479691128)
+- [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128)
+- [一键导入脚本库](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%22%5D)
 - [脚本目录](Scripting/Scripts/)
 - [贡献与新增规范](CONTRIBUTING.md)

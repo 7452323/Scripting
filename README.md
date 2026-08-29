@@ -7,7 +7,7 @@
 从实用工具到主屏幕 Widget。每个项目独立维护、独立导入、独立更新。
 
 [![Platform](https://img.shields.io/badge/Platform-iPhone%20%7C%20iPad-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128)
-[![Projects](https://img.shields.io/badge/Projects-33-34C759)](Scripting/)
+[![Projects](https://img.shields.io/badge/Projects-32-34C759)](Scripting/)
 [![Stars](https://img.shields.io/github/stars/7452323/Scripting?style=flat&label=Stars)](https://github.com/7452323/Scripting/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/7452323/Scripting?style=flat&label=Updated)](https://github.com/7452323/Scripting/commits/main)
 
@@ -25,7 +25,7 @@
 
 | 项目规模 | 导入方式 | 维护方式 |
 | :--- | :--- | :--- |
-| 33 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
+| 32 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
 
 ## 自己常用
 
@@ -35,7 +35,7 @@
 | [Iwara](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FIwara%22%5D) | 视频浏览、筛选、收藏、画质选择、后台下载和相册保存。 |
 | [视频解析下载](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%A7%86%E9%A2%91%E8%A7%A3%E6%9E%90%E4%B8%8B%E8%BD%BD%22%5D) | 解析并下载抖音、Twitter/X、小红书、Instagram 和 Bilibili 媒体。 |
 | [镜花水月](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E9%95%9C%E8%8A%B1%E6%B0%B4%E6%9C%88%22%5D) | 抖音作品浏览、收藏、历史、无水印解析、下载、保存和分享。 |
-| [联系人管理器](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%81%94%E7%B3%BB%E4%BA%BA%E7%AE%A1%E7%90%86%E5%99%A8%22%5D) | 联系人浏览、编辑、去重、备份、统计与设置。 |
+| [PureBox](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FPureBox%22%5D) | 本机联系人、照片、提醒事项、日历、通知、Safari 数据和脚本缓存清理。 |
 | [Gist](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FGist%22%5D) | 在 Scripting 中打开并使用 GitHub Gist 管理页面。 |
 
 ## 全部项目
@@ -91,7 +91,6 @@
 | [破壳日](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E7%A0%B4%E5%A3%B3%E6%97%A5%22%5D) | 生日与纪念日 Widget，支持昵称、头像、阳历/农历和寄语。 |
 | [负一屏低栏](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%B4%9F%E4%B8%80%E5%B1%8F%E4%BD%8E%E6%A0%8F%22%5D) | 中号低栏 Widget，可配置透明背景、天气栏和内容区颜色。 |
 | [仙女棒](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E4%BB%99%E5%A5%B3%E6%A3%92%22%5D) | 六档强度和锐度模式的连续触觉控制工具。 |
-| [联系人管理器](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%81%94%E7%B3%BB%E4%BA%BA%E7%AE%A1%E7%90%86%E5%99%A8%22%5D) | 联系人浏览、编辑、去重、备份、统计与设置。 |
 
 ## 使用说明
 

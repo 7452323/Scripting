@@ -61,6 +61,7 @@
 | :--- | :--- |
 | [115 获取 Cookie](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F115%E8%8E%B7%E5%8F%96Cookie%22%5D) | 通过 115 二维码登录，提取、校验、保存和复制 Cookie。 |
 | [PulseNet](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FPulseNet%22%5D) | 下载、上传、延迟、抖动和公网 IP 监控，并提供计时悬浮窗与 Live Activity。 |
+| [Surge Pro](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FSurge_Pro%22%5D) | Surge HTTP API 监控面板，提供指标、流量、DNS、规则、策略组和 Widget。 |
 | [TG 订阅管理](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FTG%E8%AE%A2%E9%98%85%E7%AE%A1%E7%90%86%22%5D) | Telegram 频道订阅数据管理、缓存、设置和 Widget 刷新。 |
 | [和风天气](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E5%92%8C%E9%A3%8E%E5%A4%A9%E6%B0%94%22%5D) | 实时天气、体感、空气质量、逐小时和未来预报。 |
 | [抖音 Cookie 获取](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E6%8A%96%E9%9F%B3%20Cookie%20%E8%8E%B7%E5%8F%96%22%5D) | 在 WebView 登录抖音，验证并管理 Cookie。 |

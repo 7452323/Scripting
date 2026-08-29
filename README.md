@@ -27,15 +27,16 @@
 | :--- | :--- | :--- |
 | 32 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
 
-## 精选项目
+## 自己常用
 
 | 项目 | 用途 |
 | :--- | :--- |
-| [App Store 限免](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FApp%20Store%E9%99%90%E5%85%8D%22%5D) | 限免应用发现、筛选与 App Store 跳转。 |
-| [Github 上传](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FGithub%E4%B8%8A%E4%BC%A0%22%5D) | 上传文件或文件夹到 GitHub，含分支、路径和提交管理。 |
 | [MoonTVPlua](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FMoonTVPlua%22%5D) | 媒体浏览、搜索、资料库与播放。 |
-| [Surge Pro](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FSurge_Pro%22%5D) | Surge HTTP API 监控面板与 Widget。 |
-| [每日图文](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E6%AF%8F%E6%97%A5%E5%9B%BE%E6%96%87%22%5D) | 每日背景图与一言，支持缓存、固定内容及三种 Widget 尺寸。 |
+| [Iwara](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FIwara%22%5D) | 视频浏览、筛选、收藏、画质选择、后台下载和相册保存。 |
+| [视频解析下载](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%A7%86%E9%A2%91%E8%A7%A3%E6%9E%90%E4%B8%8B%E8%BD%BD%22%5D) | 解析并下载抖音、Twitter/X、小红书、Instagram 和 Bilibili 媒体。 |
+| [镜花水月](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E9%95%9C%E8%8A%B1%E6%B0%B4%E6%9C%88%22%5D) | 抖音作品浏览、收藏、历史、无水印解析、下载、保存和分享。 |
+| [联系人管理器](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%81%94%E7%B3%BB%E4%BA%BA%E7%AE%A1%E7%90%86%E5%99%A8%22%5D) | 联系人浏览、编辑、去重、备份、统计与设置。 |
+| [Gist](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FGist%22%5D) | 在 Scripting 中打开并使用 GitHub Gist 管理页面。 |
 
 ## 全部项目
 

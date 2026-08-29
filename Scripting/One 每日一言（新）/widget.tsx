@@ -1,101 +1,151 @@
-// ONE 每日一言 — 纯 Worker API（无 AES）
+// ONE 每日一言 - Worker API
 import { VStack, ZStack, Text, Image, Spacer, Widget, Device, fetch } from "scripting"
 
 const WORKER = "https://one.1314k.eu.org/daily"
+const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
+const usesSystemBackground = Widget.isTransparentMode || Widget.isBlurMode || Widget.isTransparentBackground
 
 function today(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const date = new Date()
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
 }
 
-interface Article { author: string; desc: string; image: string }
+type Article = { author: string; desc: string; image: string }
+type CachedArticle = { article: Article; fetchedAt?: number }
 
 async function fetchArticle(): Promise<Article> {
-  const r = await fetch(`${WORKER}?date=${today()}`)
-  const d = JSON.parse(await r.text())
-  if (d.error) throw new Error(d.error)
-  return { author: d.author || "", desc: d.desc || "", image: d.image || "" }
+  const response = await fetch(`${WORKER}?date=${today()}`)
+  if (!response.ok) throw new Error(`请求失败（${response.status}）`)
+  const data = JSON.parse(await response.text())
+  if (data.error) throw new Error(data.error)
+  return { author: data.author || "", desc: data.desc || "", image: data.image || "" }
 }
 
-/** 自适应文字颜色 */
-function adaptiveTextColor(img: UIImage): { main: string; sub: string } {
-  const c = img.averageColor()
-  if (!c) return { main: "rgba(255,255,255,0.92)", sub: "rgba(255,255,255,0.55)" }
-  const lum = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue
-  if (lum > 0.6) return { main: "rgba(0,0,0,0.88)", sub: "rgba(0,0,0,0.55)" }
-  return { main: "rgba(255,255,255,0.92)", sub: "rgba(255,255,255,0.55)" }
+function adaptiveTextColor(image: UIImage | null): { main: string; sub: string } {
+  const color = image?.averageColor()
+  if (!color) return { main: "rgba(255,255,255,0.92)", sub: "rgba(255,255,255,0.62)" }
+  const brightness = 0.2126 * color.red + 0.7152 * color.green + 0.0722 * color.blue
+  return brightness > 0.6
+    ? { main: "rgba(0,0,0,0.88)", sub: "rgba(0,0,0,0.56)" }
+    : { main: "rgba(255,255,255,0.92)", sub: "rgba(255,255,255,0.62)" }
 }
 
-function OneWidget(props: { desc: string; author: string; bgImage: UIImage | null; textColor: string; subColor: string }) {
-  const f = Widget.family
-  const s = Widget.displaySize
-  const sm = f === "systemSmall"
-  const md = f === "systemMedium"
-  const tc = props.textColor as any
-  const sc = props.subColor as any
+function OneWidget(props: {
+  desc: string
+  author: string
+  bgImage: UIImage | null
+  textColor: string
+  subColor: string
+  updatedAt: Date
+}) {
+  const size = Widget.displaySize
+  const small = Widget.family === "systemSmall"
+  const medium = Widget.family === "systemMedium"
+
   return (
     <ZStack>
-      {props.bgImage ? <Image image={props.bgImage} resizable scaleToFill widgetAccentedRenderingMode="desaturated" frame={{ width: s.width, height: s.height }} /> : null}
+      {!usesSystemBackground && props.bgImage ? (
+        <Image
+          image={props.bgImage}
+          resizable
+          scaleToFill
+          widgetBackground="clear"
+          widgetAccentedRenderingMode="desaturated"
+          frame={{ width: size.width, height: size.height }}
+        />
+      ) : (
+        <VStack frame={{ width: size.width, height: size.height }} widgetBackground="clear" />
+      )}
       <VStack>
-        <Text widgetAccentable font={sm ? 8 : md ? 9 : 11} foregroundStyle={sc} padding={{ horizontal: sm ? 8 : 12, vertical: sm ? 4 : 6 }}>ONE · 每日一言</Text>
+        <Text widgetAccentable font={small ? 8 : medium ? 9 : 11} foregroundStyle={props.subColor as any} padding={{ horizontal: small ? 8 : 12, vertical: small ? 4 : 6 }}>
+          ONE - 每日一言
+        </Text>
         <Spacer />
-        <VStack padding={{ horizontal: sm ? 10 : 14, vertical: sm ? 8 : 10 }}>
-          <Text widgetAccentable font={sm ? 10 : md ? 12 : 15} foregroundStyle={tc} lineLimit={sm ? 5 : md ? 4 : 8}>{props.desc}</Text>
-          {props.author ? <Text widgetAccentable font={sm ? 9 : md ? 10 : 12} foregroundStyle={sc}>—— {props.author}</Text> : null}
+        <VStack padding={{ horizontal: small ? 10 : 14, vertical: small ? 8 : 10 }} spacing={3}>
+          <Text widgetAccentable font={small ? 10 : medium ? 12 : 15} foregroundStyle={props.textColor as any} lineLimit={small ? 5 : medium ? 4 : 8}>
+            {props.desc}
+          </Text>
+          {props.author ? <Text widgetAccentable font={small ? 9 : medium ? 10 : 12} foregroundStyle={props.subColor as any}>-- {props.author}</Text> : null}
+          <Text widgetAccentable font={small ? 7 : 8} foregroundStyle={props.subColor as any} opacity={0.75}>
+            更新 {props.updatedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          </Text>
         </VStack>
       </VStack>
     </ZStack>
   )
 }
 
-;(async () => {
+async function readCachedArticle(path: string): Promise<CachedArticle | null> {
+  if (!(await FileManager.exists(path))) return null
   try {
-    const dir = FileManager.appGroupDocumentsDirectory
-    const day = today()
-    const imgPath = `${dir}/one_bg_${day}.jpg`
-    const metaPath = `${dir}/one_meta_${day}.json`
+    return JSON.parse(await FileManager.readAsString(path)) as CachedArticle
+  } catch {
+    return null
+  }
+}
 
-    let bgImage: UIImage | null = null
+async function saveBackground(article: Article, path: string): Promise<UIImage | null> {
+  if (!article.image) return null
+  const raw = Data.fromBase64String(article.image.split(",")[1] || article.image)
+  const image = raw ? UIImage.fromData(raw) : null
+  if (!image) return null
+
+  const scale = Device.screen.scale
+  const size = Widget.displaySize
+  const thumbnail = image.preparingThumbnail({
+    width: Math.round(size.width * scale),
+    height: Math.round(size.height * scale),
+  })
+  const jpeg = thumbnail?.toJPEGData(0.8)
+  if (jpeg) await FileManager.writeAsData(path, jpeg)
+  return thumbnail || image
+}
+
+;(async () => {
+  const dir = FileManager.appGroupDocumentsDirectory
+  const day = today()
+  const imagePath = `${dir}/one_bg_${day}.jpg`
+  const metadataPath = `${dir}/one_meta_${day}.json`
+
+  try {
+    const cached = await readCachedArticle(metadataPath)
+    const isFresh = !!cached?.fetchedAt && Date.now() - cached.fetchedAt < REFRESH_INTERVAL_MS
     let article: Article
+    let image: UIImage | null
+    let updatedAt: Date
 
-    // 缓存命中
-    if (await FileManager.exists(imgPath) && await FileManager.exists(metaPath)) {
-      const meta = JSON.parse(await FileManager.readAsString(metaPath))
-      bgImage = UIImage.fromFile(imgPath)
-      article = meta.article
+    if (isFresh && await FileManager.exists(imagePath)) {
+      article = cached!.article
+      image = UIImage.fromFile(imagePath)
+      updatedAt = new Date(cached!.fetchedAt!)
     } else {
-      article = await fetchArticle()
-      if (article.image) {
-        const b64 = article.image.split(",")[1] || article.image
-        const raw = Data.fromBase64String(b64)
-        if (raw) {
-          const img = UIImage.fromData(raw)
-          if (img) {
-            bgImage = img
-            const ws = Widget.displaySize, sc = Device.screen.scale
-            const thumb = img.preparingThumbnail({ width: Math.round(ws.width * sc), height: Math.round(ws.height * sc) })
-            if (thumb) { const jpg = thumb.toJPEGData(0.8); if (jpg) { try { await FileManager.remove(imgPath) } catch {}; await FileManager.writeAsData(imgPath, jpg) } }
-          }
-        }
+      try {
+        article = await fetchArticle()
+        image = await saveBackground(article, imagePath)
+        updatedAt = new Date()
+        await FileManager.writeAsString(metadataPath, JSON.stringify({ article, fetchedAt: updatedAt.getTime() }))
+      } catch (error) {
+        if (!cached?.article) throw error
+        article = cached.article
+        image = await FileManager.exists(imagePath) ? UIImage.fromFile(imagePath) : null
+        updatedAt = cached.fetchedAt ? new Date(cached.fetchedAt) : new Date()
       }
-      await FileManager.writeAsString(metaPath, JSON.stringify({ article }))
     }
 
-    // 自适应文字颜色
-    const colors = bgImage ? adaptiveTextColor(bgImage) : { main: "rgba(255,255,255,0.92)", sub: "rgba(255,255,255,0.55)" }
-
+    const colors = adaptiveTextColor(image)
     Widget.present(
-      <OneWidget desc={article.desc} author={article.author} bgImage={bgImage} textColor={colors.main} subColor={colors.sub} />,
-      { policy: "after", date: new Date(Date.now() + 4 * 3600 * 1000) }
+      <OneWidget desc={article.desc} author={article.author} bgImage={image} textColor={colors.main} subColor={colors.sub} updatedAt={updatedAt} />,
+      { policy: "after", date: new Date(Date.now() + REFRESH_INTERVAL_MS) },
     )
-  } catch (e: unknown) {
-    const m = e instanceof Error ? e.message : String(e)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
     Widget.present(
-      <VStack padding={8}>
+      <VStack padding={8} widgetBackground="clear">
         <Text font="headline">ONE</Text><Spacer />
         <Text font="footnote" opacity={0.6}>加载失败</Text>
-        <Text font="caption2" opacity={0.4}>{m}</Text>
-      </VStack>
+        <Text font="caption2" opacity={0.4}>{message}</Text>
+      </VStack>,
+      { policy: "after", date: new Date(Date.now() + REFRESH_INTERVAL_MS) },
     )
   }
 })()

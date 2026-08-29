@@ -108,6 +108,6 @@
 
 <div align="center">
 
-随缘更新 · 遇到问题请 [提交 Issue](https://github.com/7452323/Scripting/issues/new/choose) · [GitHub 服务条款](https://docs.github.com/site-policy/github-terms/github-terms-of-service)
+随缘更新 · 遇到问题请 [提交 Issue](https://github.com/7452323/Scripting/issues/new/choose) · [MIT License](LICENSE)
 
 </div>

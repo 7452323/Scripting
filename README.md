@@ -7,7 +7,7 @@
 从实用工具到主屏幕 Widget。每个项目独立维护、独立导入、独立更新。
 
 [![Platform](https://img.shields.io/badge/Platform-iPhone%20%7C%20iPad-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128)
-[![Projects](https://img.shields.io/badge/Projects-31-34C759)](Scripting/)
+[![Projects](https://img.shields.io/badge/Projects-32-34C759)](Scripting/)
 [![Stars](https://img.shields.io/github/stars/7452323/Scripting?style=flat&label=Stars)](https://github.com/7452323/Scripting/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/7452323/Scripting?style=flat&label=Updated)](https://github.com/7452323/Scripting/commits/main)
 
@@ -25,7 +25,7 @@
 
 | 项目规模 | 导入方式 | 维护方式 |
 | :--- | :--- | :--- |
-| 31 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
+| 32 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
 
 ## 精选项目
 
@@ -60,6 +60,7 @@
 | 项目 | 描述 |
 | :--- | :--- |
 | [115 获取 Cookie](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F115%E8%8E%B7%E5%8F%96Cookie%22%5D) | 通过 115 二维码登录，提取、校验、保存和复制 Cookie。 |
+| [CF Workers面板](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FCF%20Workers%E9%9D%A2%E6%9D%BF%22%5D) | Cloudflare Workers 与 Pages 调用监控、分析趋势和多尺寸 Widget 面板。 |
 | [PulseNet](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FPulseNet%22%5D) | 下载、上传、延迟、抖动和公网 IP 监控，并提供计时悬浮窗与 Live Activity。 |
 | [Surge Pro](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FSurge_Pro%22%5D) | Surge HTTP API 监控面板，提供指标、流量、DNS、规则、策略组和 Widget。 |
 | [TG 订阅管理](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FTG%E8%AE%A2%E9%98%85%E7%AE%A1%E7%90%86%22%5D) | Telegram 频道订阅数据管理、缓存、设置和 Widget 刷新。 |

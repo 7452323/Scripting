@@ -1,0 +1,30 @@
+{
+  "icon" : "link.circle.fill",
+  "iconImage" : "",
+  "runInApp" : false,
+  "author" : {
+    "name" : "Waa",
+    "homepage" : "https:\/\/github.com\/iamwaa",
+    "email" : null
+  },
+  "color" : "rgba(10, 132, 255, 1)",
+  "intentInputTypes" : [
+
+  ],
+  "remoteResource" : null,
+  "localizedDescriptions" : {
+    "zh" : "磁力、ED2K 与下载链接资源预览工具。基于 whatslink.info 查询接口，展示资源名称、大小、文件数量、类型和截图，并支持收藏、复制链接、保存预览截图。",
+    "en" : "Preview magnet, ED2K and download link metadata via whatslink.info."
+  },
+  "version" : "1.1.0",
+  "name" : "磁力资源预览",
+  "entry" : "index.tsx",
+  "contributors" : [
+
+  ],
+  "description" : "磁力、ED2K 与下载链接资源预览工具。基于 whatslink.info 查询接口，展示资源名称、大小、文件数量、类型和截图，并支持收藏、复制链接、保存预览截图。",
+  "localizedNames" : {
+    "en" : "Magnet Preview",
+    "zh" : "磁力资源预览"
+  }
+}

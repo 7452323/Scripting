@@ -7,7 +7,7 @@
 从实用工具到主屏幕 Widget。每个项目独立维护、独立导入、独立更新。
 
 [![Platform](https://img.shields.io/badge/Platform-iPhone%20%7C%20iPad-007AFF?logo=apple&logoColor=white)](https://apps.apple.com/app/apple-store/id6479691128)
-[![Projects](https://img.shields.io/badge/Projects-32-34C759)](Scripting/)
+[![Projects](https://img.shields.io/badge/Projects-33-34C759)](Scripting/)
 [![Stars](https://img.shields.io/github/stars/7452323/Scripting?style=flat&label=Stars)](https://github.com/7452323/Scripting/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/7452323/Scripting?style=flat&label=Updated)](https://github.com/7452323/Scripting/commits/main)
 
@@ -25,7 +25,7 @@
 
 | 项目规模 | 导入方式 | 维护方式 |
 | :--- | :--- | :--- |
-| 32 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
+| 33 个独立项目 | 单项目导入 | 项目内 README 与版本日志 |
 
 ## 自己常用
 
@@ -78,6 +78,7 @@
 | [亚洲色吧](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E4%BA%9A%E6%B4%B2%E8%89%B2%E5%90%A7%22%5D) | 内置站点内容浏览。 |
 | [视频解析下载](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%A7%86%E9%A2%91%E8%A7%A3%E6%9E%90%E4%B8%8B%E8%BD%BD%22%5D) | 解析并下载抖音、Twitter/X、小红书、Instagram 和 Bilibili 媒体。 |
 | [镜花水月](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E9%95%9C%E8%8A%B1%E6%B0%B4%E6%9C%88%22%5D) | 抖音作品浏览、收藏、历史、无水印解析、下载、保存和分享。 |
+| [磁力资源预览](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E7%A3%81%E5%8A%9B%E8%B5%84%E6%BA%90%E9%A2%84%E8%A7%88%22%5D) | 磁力、ED2K 与下载链接预览工具。原作者暂不明确；7452323 二次开发加入番号查询，可检索 MissAV 与 JavDB 公开结果。 |
 
 ### 日常与 Widget
 

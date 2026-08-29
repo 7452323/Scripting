@@ -27,7 +27,7 @@
     "fr" : "",
     "es" : ""
   },
-  "version" : "1.0.0",
+  "version" : "1.1.0",
   "entry" : "index.tsx",
   "iconImage" : "https:\/\/raw.githubusercontent.com\/7452323\/QuantumultX\/main\/icon\/one2.png",
   "localizedDescriptions" : {

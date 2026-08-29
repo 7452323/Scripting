@@ -1,0 +1,45 @@
+{
+  "version" : "1.2.0",
+  "intentInputTypes" : [
+
+  ],
+  "iconImage" : null,
+  "author" : {
+    "homepage" : null,
+    "name" : "7452323",
+    "email" : "7452323@gmail.com"
+  },
+  "localizedDescriptions" : {
+    "ja" : "",
+    "pt" : "",
+    "zh" : "Cloudflare Workers 与 Pages 调用监控面板。",
+    "fr" : "",
+    "en" : "",
+    "es" : "",
+    "it" : "",
+    "ru" : "",
+    "de" : ""
+  },
+  "remoteResource" : null,
+  "color" : "rgba(0, 198, 165,1)",
+  "description" : "Cloudflare Workers 与 Pages 调用监控面板。",
+  "runInApp" : false,
+  "entry" : "index.tsx",
+  "permissions" : null,
+  "localizedNames" : {
+    "en" : "",
+    "it" : "",
+    "es" : "",
+    "fr" : "",
+    "pt" : "",
+    "zh" : "CF Workers面板",
+    "de" : "",
+    "ja" : "",
+    "ru" : ""
+  },
+  "icon" : "square.2.layers.3d.fill",
+  "name" : "CF Workers面板",
+  "contributors" : [
+
+  ]
+}

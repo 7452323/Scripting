@@ -103,3 +103,11 @@
 - [安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128)
 - [浏览项目目录](Scripting/)
 - [查看贡献与维护规范](CONTRIBUTING.md)
+
+---
+
+<div align="center">
+
+随缘更新 · 遇到问题请 [提交 Issue](https://github.com/7452323/Scripting/issues/new/choose) · [GitHub 服务条款](https://docs.github.com/site-policy/github-terms/github-terms-of-service)
+
+</div>

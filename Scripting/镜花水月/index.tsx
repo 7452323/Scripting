@@ -909,7 +909,7 @@ function loadCurrentSavedUser(): SavedUser | null {
 function saveUser(user: SavedUser) {
   const users = loadSavedUsers(); const idx = users.findIndex((u) => u.id === user.id)
   if (idx >= 0) users.splice(idx, 1); users.unshift(user)
-  Storage.set(KEY_SAVED_USERS, JSON.stringify(users.slice(0, 20)))
+  Storage.set(KEY_SAVED_USERS, JSON.stringify(users))
 }
 
 // ─── 抖音号解析 ───
@@ -1976,14 +1976,12 @@ function SettingsView({ isActive }: { isActive: boolean }) {
                 <Text font="caption" foregroundStyle="secondaryLabel">{cookieStatus.checking ? "" : cookieStatus.detail}</Text>
               </VStack>
               <Spacer />
+              {cookieStatus.valid ? (
+                <Button title="清除 Cookie" role="destructive" buttonStyle="borderless" action={handleCookieClear} />
+              ) : null}
             </HStack>
 
-            {cookieStatus.valid ? (
-              <HStack frame={{ maxWidth: "infinity" }}>
-                <Spacer />
-                <Button title="清除 Cookie" role="destructive" action={handleCookieClear} />
-              </HStack>
-            ) : (
+            {!cookieStatus.valid ? (
               <VStack spacing={8} frame={{ maxWidth: "infinity" }}>
                 <TextField
                   title="Cookie"
@@ -1996,7 +1994,7 @@ function SettingsView({ isActive }: { isActive: boolean }) {
                   <Button title={savingCookie ? "校验中..." : "校验并保存"} action={handleCookieSave} disabled={savingCookie || !cookieValue.trim()} />
                 </HStack>
               </VStack>
-            )}
+            ) : null}
           </VStack>
         </Section>
 

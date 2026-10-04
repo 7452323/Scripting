@@ -1,6 +1,6 @@
 /** changelog.ts — 版本与更新日志（首次打开该版本时以底部 Sheet 展示） */
 
-export const VERSION = "3.8.3"
+export const VERSION = "3.9.0"
 
 export const CHANGELOG_KEY = "calendar.changelog.seen"
 
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "3.9.0",
+    title: "桌面小组件不再写死背景色",
+    notes: [
+      "小组件背景改为**不设自定义底色**（`widgetBackground={undefined}`）—— 写法参照「一言小组件」：没开颜色背景时它就是 undefined",
+      "不铺底就交给 Scripting / 系统：普通组件用系统默认材质；透明背景 / 模糊背景 / 图片模拟透明组件直接透出壁纸 / 模糊层",
+      "之前写死的浅白 / 深黑会把这层底衬盖住，那正是「透明背景没了」的来因",
+      "补上文档「使用说明」要求的 `Script.exit()`",
+    ],
+  },
   {
     version: "3.8.3",
     title: "设置页增加关于",

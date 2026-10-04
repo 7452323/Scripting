@@ -27,12 +27,17 @@ const MONTH_CN = ["一", "二", "三", "四", "五", "六", "七", "八", "九",
 export type WidgetSize = "small" | "medium" | "large"
 
 /**
- * 小组件背景色。
+ * 真机小组件的背景 —— **不设自定义底色**（`undefined`）。
  *
- * 浅 / 深两个值交给系统的 `widgetBackground`，系统浅色 / 深色模式切换时
- * 会自动选用对应那个，无需自己监听。
+ * 写法参照「一言小组件」的 generateWidgetBackground()：没开颜色背景时返回 undefined，
+ * 即 `widgetBackground={undefined}` —— 不铺底，交给 Scripting / 系统：
+ * 普通组件用系统默认材质，透明背景 / 模糊背景 / 图片模拟透明组件直接透出壁纸 / 模糊层。
+ * 写死成白 / 黑这种不透明底色，只会把底衬盖掉（这就是「透明背景没了」的来因）。
  */
-export const WIDGET_BACKGROUND: DynStyle = { light: "#FFFFFF", dark: "#1C1C1E" }
+export const WIDGET_BACKGROUND: DynStyle | undefined = undefined
+
+/** App 内「小组件预览」的卡片底 —— 仅用于预览，不是真机小组件的背景 */
+export const PREVIEW_BACKGROUND: DynStyle = { light: "#FFFFFF", dark: "#1C1C1E" }
 
 /** 三种尺寸及其内容（设置页预览用） */
 export const WIDGET_SIZES: { key: WidgetSize; label: string; hint: string }[] = [
@@ -294,7 +299,8 @@ function DayList({
 /**
  * 完整的小组件版式：背景层 + 内容 + 内边距。
  *
- * `drawBackground` 为 false 时不画底色（透明 / 毛玻璃模式下背景由系统绘制）。
+ * 真机小组件只声明 `widgetBackground`，值就是 `WIDGET_BACKGROUND`（undefined = 不铺底）；
+ * App 内预览不是小组件，给自己的卡片底。
  */
 export function WidgetContent({
   size,
@@ -302,7 +308,6 @@ export function WidgetContent({
   events,
   todos,
   today,
-  background,
   inWidget = true,
 }: {
   size: WidgetSize
@@ -310,19 +315,12 @@ export function WidgetContent({
   events: AgendaItem[]
   todos: TodoItem[]
   today: Date
-  /** 背景色（浅 / 深双值），系统浅色 / 深色切换时由系统自动选用 */
-  background: DynStyle
-  /**
-   * 是否运行在真正的小组件环境。
-   *
-   * 真机用 `widgetBackground` —— 文档明确推荐：accented 模式下 `background`
-   * 会被系统强行渲成白色，而 `widgetBackground` 会自动隐藏；透明 / 毛玻璃模式
-   * 它也会自动跳过，不用自己判断。App 内预览则用普通 `background`。
-   */
+  /** true = 真机小组件；false = App 内设置页预览 */
   inWidget?: boolean
 }) {
-  const now = new Date()
-  const bgProps = (inWidget ? { widgetBackground: background } : { background }) as any
+  const bgProps = (inWidget
+    ? { widgetBackground: WIDGET_BACKGROUND }
+    : { background: PREVIEW_BACKGROUND }) as any
 
   return (
     <ZStack alignment="topLeading" {...bgProps}>

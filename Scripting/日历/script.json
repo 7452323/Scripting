@@ -4,7 +4,7 @@
     "calendar",
     "reminders"
   ],
-  "version" : "3.8.3",
+  "version" : "3.9.0",
   "entry" : "index.tsx",
   "description" : null,
   "contributors" : [

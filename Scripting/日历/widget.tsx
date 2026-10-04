@@ -6,24 +6,27 @@
  *   medium —— 左边月历 + 右边待办
  *   large  —— 月历 + 下方待办 / 日子倒数
  *
- * 背景色在设置页里选（默认白色），是**浅 / 深双值**，交给系统的 `widgetBackground`
- * 后会自动跟随系统浅色 / 深色模式，且在透明 / 毛玻璃 / accented 模式下自动跳过。
+ * 背景：只声明 `widgetBackground`，值不设自定义颜色（`undefined`）—— 写法参照「一言小组件」，
+ * 没开颜色背景时就是 undefined。不铺底就交给 Scripting / 系统：普通组件用系统默认材质，
+ * 透明背景 / 模糊背景 / 图片模拟透明组件直接透出壁纸 / 模糊层。
+ * 写死成白 / 黑这种不透明底色只会把底衬盖掉（那就是「透明背景没了」的来因）。
  *
  * 视图本体在 widget_views.tsx —— 与设置页里的「小组件预览」共用同一份渲染代码。
  *
  * 注意：
  * - 小组件里不能用 useState / useEffect（渲染一次就结束）。
  * - `Widget.present()` 之后执行上下文立即销毁，所有数据必须先准备好。
+ * - 文档「使用说明」要求脚本结束前调用 `Script.exit()`。
  */
 
-import { Widget } from "scripting"
+import { Script, Widget } from "scripting"
 
 import type { AgendaItem, DayItem, TodoItem } from "./data"
 import { loadDays, loadSystemEvents, loadSystemTodos } from "./data"
 import { addDays, startOfDay } from "./lunar"
 import { applyAccentTheme, applyAppearance } from "./theme"
 import { loadSettings } from "./settings"
-import { WIDGET_BACKGROUND, WidgetContent, type WidgetSize } from "./widget_views"
+import { WidgetContent, type WidgetSize } from "./widget_views"
 
 /** 系统小组件尺寸 → 内部尺寸 */
 function familyToSize(family: string): WidgetSize {
@@ -37,7 +40,6 @@ async function main() {
 
   // 小组件是独立进程，App 里的 useColorScheme 在这里拿不到；
   // 直接读 Device 并展开配色，这样文字 / 分隔线 / 强调色在深色下才正确。
-  // （背景色不依赖它 —— 那是浅 / 深双值，由系统自己选。）
   applyAccentTheme(settings.accent)
   applyAppearance(Device.colorScheme)
 
@@ -59,15 +61,15 @@ async function main() {
   }
 
   Widget.present(
-    <WidgetContent
-      size={size}
-      days={days}
-      events={events}
-      todos={todos}
-      today={today}
-      background={WIDGET_BACKGROUND}
-    />
+    <WidgetContent size={size} days={days} events={events} todos={todos} today={today} />
   )
+
+  // 文档「使用说明」：脚本结束后应调用 Script.exit() 以确保小组件正常退出
+  try {
+    Script.exit()
+  } catch (e) {
+    // 小组件环境下 present 之后上下文可能已销毁，忽略
+  }
 }
 
 main()

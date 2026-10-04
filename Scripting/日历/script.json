@@ -1,0 +1,48 @@
+{
+  "iconImage" : null,
+  "permissions" : [
+    "calendar",
+    "reminders"
+  ],
+  "version" : "3.8.3",
+  "entry" : "index.tsx",
+  "description" : null,
+  "contributors" : [
+
+  ],
+  "localizedDescriptions" : {
+    "it" : "",
+    "es" : "",
+    "zh" : "公历、农历、节气与节日同屏的月历，日程读自系统「日历」，待办读自系统「提醒事项」，另有纪念日倒数与周期进度。全屏呈现，左上角关闭。",
+    "pt" : "",
+    "fr" : "",
+    "ru" : "",
+    "de" : "",
+    "en" : "A calendar that shows Gregorian, lunar, solar terms and festivals together. Events come from the system Calendar, todos from Reminders.",
+    "ja" : ""
+  },
+  "name" : "日历",
+  "runInApp" : false,
+  "icon" : "calendar",
+  "remoteResource" : null,
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "Scripting"
+  },
+  "localizedNames" : {
+    "pt" : "",
+    "en" : "Calendar",
+    "zh" : "日历",
+    "fr" : "",
+    "it" : "",
+    "de" : "",
+    "ru" : "",
+    "es" : "",
+    "ja" : ""
+  },
+  "color" : "rgba(192, 99, 46,1)",
+  "intentInputTypes" : [
+
+  ]
+}

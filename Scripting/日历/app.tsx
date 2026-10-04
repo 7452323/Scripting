@@ -42,7 +42,7 @@ import type { Color, DynamicShapeStyle, ShapeStyle } from "scripting"
 
 import { CHANGELOG_KEY, VERSION, latestEntry } from "./changelog"
 import { ACCENT_THEMES, C, F, applyAccentTheme, applyAppearance } from "./theme"
-import { WIDGET_BACKGROUND, WIDGET_SIZES, WidgetContent, type WidgetSize } from "./widget_views"
+import { WIDGET_SIZES, WidgetContent, type WidgetSize } from "./widget_views"
 import { sendTestNotification, rescheduleAll } from "./notify"
 import {
   applyRuntime,
@@ -2270,7 +2270,6 @@ function SettingsScreen({
                   events={events}
                   todos={todos}
                   today={today}
-                  background={WIDGET_BACKGROUND}
                   inWidget={false}
                 />
               </VStack>

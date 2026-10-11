@@ -17,6 +17,8 @@
 
 > 每个链接仅导入一个脚本项目。Scripting 不支持整库导入；项目所需的页面、资源、服务与 Widget 会随对应项目一并导入。
 
+有失效或者bug请反馈，我有空会第一时间修复。
+
 ## 开始使用
 
 1. 安装 [Scripting App](https://apps.apple.com/app/apple-store/id6479691128)。

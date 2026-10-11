@@ -145,6 +145,13 @@ function safeJSONParse(text: string | null | undefined): unknown | null {
   return null
 }
 
+/** 优先选 CDN 直链（douyinvod / tos），避开需要重定向的 play 接口 */
+function pickBestPlayUrl(urlList: string[]): string {
+  if (!urlList || urlList.length === 0) return ""
+  const direct = urlList.find((u) => u.includes("douyinvod.com") || u.includes("/video/tos/"))
+  return direct || urlList[urlList.length - 1] || urlList[0] || ""
+}
+
 /**
  * 从 aweme_detail 中提取无水印视频 URL
  * 将 /playwm/ 替换为 /play/ 获取无水印版本
@@ -159,8 +166,8 @@ function extractVideoUrlFromAweme(awemeDetail: any): string | null {
   if (!urlList.length) urlList = video.play_addr_265?.url_list || []
   
   if (urlList.length > 0) {
-    // 取最高画质（最后一个）的 URL
-    let url = urlList[urlList.length - 1] || urlList[0]
+    // 优先 CDN 直链（douyinvod / tos），其次才用需要重定向的 play 接口
+    let url = pickBestPlayUrl(urlList)
     // playwm → play 转换获取无水印版本
     if (url.includes("/playwm/")) {
       url = url.replace("/playwm/", "/play/")
@@ -172,7 +179,7 @@ function extractVideoUrlFromAweme(awemeDetail: any): string | null {
   if (video.bit_rate?.length > 0) {
     for (const br of video.bit_rate) {
       if (br.play_addr?.url_list?.length > 0) {
-        let url = br.play_addr.url_list[br.play_addr.url_list.length - 1]
+        let url = pickBestPlayUrl(br.play_addr.url_list)
         if (url.includes("/playwm/")) {
           url = url.replace("/playwm/", "/play/")
         }
@@ -241,11 +248,51 @@ function extractAwemeFromRouterData(routerData: any): any {
  * @param isImage 是否提取图片（可选，自动检测）
  * @returns { url: 无水印URL, imageUrls: 图文作品的图片列表 }
  */
+/** 用网页端签名请求作品详情，返回 aweme_detail（失败返回 null） */
+async function fetchAwemeDetail(awemeId: string): Promise<any | null> {
+  try {
+    const uifid = await ensureUifid()
+    if (!uifid) return null
+    const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
+    const rawQuery = `device_platform=webapp&aid=6383&aweme_id=${awemeId}&cookie_enabled=true&platform=PC`
+    const signed = websignQuery(rawQuery, uifid)
+    const resp = await fetch(`https://www.douyin.com/aweme/v1/web/aweme/detail/?${signed}`, {
+      headers: {
+        "User-Agent": DESKTOP_UA,
+        "Referer": "https://www.douyin.com/",
+        "Accept": "application/json, text/plain, */*",
+        "uifid": uifid,
+        "Cookie": cookie,
+      },
+    })
+    if (!resp.ok) return null
+    const text = await resp.text()
+    if (!text) return null
+    const data = JSON.parse(text)
+    return data?.aweme_detail || null
+  } catch { return null }
+}
+
 async function extractNoWatermarkUrl(
   video: VideoInfo,
   isImage?: boolean,
   imageIndex: number = 0
 ): Promise<{ url: string; imageUrls: string[] }> {
+  // ① 优先走签名接口：不依赖 WebView 渲染，直接拿到 CDN 无水印直链
+  try {
+    const detail = await fetchAwemeDetail(video.aweme_id)
+    if (detail) {
+      const imageUrls = extractImagesFromAweme(detail)
+      const hasImages = !!(detail.images && detail.images.length > 0)
+      const hasVideo = !!(detail.video && (detail.video.play_addr || detail.video.play_addr_h264))
+      if ((isImage || (hasImages && !hasVideo)) && imageUrls.length > 0) {
+        return { url: imageUrls[imageIndex] || imageUrls[0], imageUrls }
+      }
+      const detailVideoUrl = extractVideoUrlFromAweme(detail)
+      if (detailVideoUrl) return { url: detailVideoUrl, imageUrls }
+    }
+  } catch {}
+  // ② 回退：WebView 页面解析
   const shareUrl = getShareUrl(video)
   const webView = new WebViewController({ ephemeral: true })
   
@@ -542,7 +589,7 @@ function ShareProgressView({ video, shareUrl, isImage, originalUrl, imageVideoUr
         // 使用分块下载获取实时进度（512KB/块）
         const data = await downloadWithProgress(
           downloadUrl,
-          { "User-Agent": MOBILE_UA },
+          { "User-Agent": MOBILE_UA, "Referer": "https://www.douyin.com/" },
           (downloaded, total) => {
             if (total > 0) {
               // 有总大小时显示 "36.5/50.0 M" 格式

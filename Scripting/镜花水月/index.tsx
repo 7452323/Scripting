@@ -32,6 +32,10 @@ interface SavedUser { id: string; nickname: string; avatar: string; savedAt: num
 
 const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 const ANDROID_UA = "Mozilla/5.0 (Android; Mobile; rv:54.0) Gecko/54.0 Firefox/54.0"
+// 网页端签名（x-secsdk-web-signature）配合使用的桌面 UA
+const DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+// secsdk VM 字符串表常量（project douyin_web id 34），与账号无关
+const SECSDK_SALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
 const POST_PAGE_SIZE = 30
 
 // ─── 工具函数 ───
@@ -1198,9 +1202,87 @@ async function fetchViaCookie(secUid: string, cursor: number = 0): Promise<strin
   return await resp.text()
 }
 
+// ─── 网页端签名（x-secsdk-web-signature / ArgusSecurityPlugin） ───
+// 抖音对 /aweme/v1/web/aweme/post/ 等接口校验签名：
+//   缺 uifid → 403 Blocked by ArgusSecurityPlugin Uifid Not Found
+//   有 uifid 无签名 → 403 Signature Not Found
+// 算法：md5(`${uifid}_${timestamp}_${SALT}_${canonicalQuery}`)，纯本地计算。
+// 三条硬性规则：uifid 只在 query 中缺失时才追加；timestamp 追加在 uifid 之后；
+// 被哈希的 query 必须与线上发送的字节完全一致（故这里直接返回编码后的串）。
+function pyQuote(s: string): string {
+  // 等价于 Python urllib.parse.quote(s, safe="*-._")
+  return encodeURIComponent(s).replace(/[!'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+}
+function safeDecode(s: string): string {
+  try { return decodeURIComponent(s) } catch { return s }
+}
+function extractUifid(cookie: string): string {
+  const m = cookie.match(/(?:^|;\s*)UIFID=([0-9a-fA-F]{16,})/)
+  return m ? m[1] : ""
+}
+function websignQuery(rawQuery: string, uifid: string): string {
+  const stamp = String(Math.floor(Date.now() / 1000))
+  const pairs: Array<[string, string]> = []
+  for (const part of rawQuery.split("&")) {
+    if (!part) continue
+    const i = part.indexOf("=")
+    pairs.push([safeDecode(i >= 0 ? part.slice(0, i) : part), safeDecode(i >= 0 ? part.slice(i + 1) : "")])
+  }
+  if (!pairs.some((p) => p[0] === "uifid")) pairs.push(["uifid", uifid])
+  pairs.push(["timestamp", stamp])
+  const hashed = pairs.map((p) => pyQuote(p[0]) + "=" + pyQuote(p[1])).join("&")
+  const payload = Data.fromString(`${uifid}_${stamp}_${SECSDK_SALT}_${hashed}`)
+  const digest = payload ? Crypto.md5(payload) : null
+  const sig = (digest ? digest.toHexString() : "").toLowerCase()
+  return `${hashed}&x-secsdk-web-signature=${sig}`
+}
+
+/** 取 uifid：优先用已保存 Cookie，缺失时到 WebView 的 Cookie 存储里补取 */
+async function ensureUifid(): Promise<string> {
+  const saved = extractUifid(Storage.get<string>(KEY_COOKIE) || "")
+  if (saved) return saved
+  const webView = new WebViewController({ ephemeral: false })
+  try {
+    await webView.loadURL("https://www.douyin.com/")
+    await webView.waitForLoad()
+    const cookies = await webView.getAllCookies()
+    const hit = cookies.find((c) => c.name === "UIFID")
+    return hit ? String(hit.value) : ""
+  } catch { return "" }
+  finally { try { webView.dispose() } catch {} }
+}
+
+/** 带网页端签名的作品列表请求（绕过 ArgusSecurityPlugin 403） */
+async function fetchViaWebsign(secUid: string, cursor: number = 0): Promise<string> {
+  const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
+  const uifid = await ensureUifid()
+  if (!uifid) throw new Error("缺少 uifid，请在设置页重新粘贴含 UIFID 的 Cookie")
+  const rawQuery = `device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id=${secUid}&max_cursor=${cursor}&count=${POST_PAGE_SIZE}&cookie_enabled=true&platform=PC&downlink=10`
+  const signed = websignQuery(rawQuery, uifid)
+  const resp = await fetch(`https://www.douyin.com/aweme/v1/web/aweme/post/?${signed}`, {
+    headers: {
+      "User-Agent": DESKTOP_UA,
+      "Referer": `https://www.douyin.com/user/${secUid}`,
+      "Accept": "application/json, text/plain, */*",
+      "uifid": uifid,
+      "Cookie": cookie,
+    },
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return await resp.text()
+}
+
 async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
-  const rawJson = await fetchViaCookie(secUid, cursor)
-  return parseAwemeResponse(rawJson)
+  let lastError: unknown = null
+  // 1) 网页端签名（当前唯一可稳定通过风控的通道）
+  try {
+    return parseAwemeResponse(await fetchViaWebsign(secUid, cursor))
+  } catch (e) { lastError = e }
+  // 2) 回退：Cookie 裸直连
+  try {
+    return parseAwemeResponse(await fetchViaCookie(secUid, cursor))
+  } catch (e) { lastError = e }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
 // ─── 获取用户完整资料 ───

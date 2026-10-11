@@ -17,6 +17,12 @@
 
 ## 版本更新
 
+### 1.0.3（2026-10-12）
+
+- 修复导出/下载 HTTP 403：去水印解析改用与列表同一套网页签名接口（`aweme/detail`），不再依赖不可见 WebView 解析页面（该方式会被风控打到验证码页，导致资源地址长度为 0）
+- 下载地址优先选 CDN 直链（`douyinvod` / `tos`），避免选中需要重定向的 `aweme/v1/play` 接口
+- 下载请求补上 `Referer: https://www.douyin.com/`
+
 ### 1.0.2（2026-10-12）
 
 - 修复作品页 HTTP 403：抖音网页接口启用 ArgusSecurityPlugin 风控，缺 uifid 即 `403 Uifid Not Found`

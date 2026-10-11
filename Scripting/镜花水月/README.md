@@ -17,6 +17,13 @@
 
 ## 版本更新
 
+### 1.0.2（2026-10-12）
+
+- 修复作品页 HTTP 403：抖音网页接口启用 ArgusSecurityPlugin 风控，缺 uifid 即 `403 Uifid Not Found`
+- 作品列表改为本地生成 `x-secsdk-web-signature` 网页签名后请求（`md5(uifid_timestamp_SALT_query)`），纯本地计算，不依赖任何第三方服务
+- 自动从已保存 Cookie（或 WebView Cookie 存储）获取 uifid
+- 保留 Cookie 直连作为回退通道
+
 ### 1.0.1（2026-09-06）
 
 - 已保存用户数量改为无上限（原上限 20）

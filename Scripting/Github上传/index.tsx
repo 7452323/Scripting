@@ -52,7 +52,28 @@ interface FileItem {
 
 // ── Constants ──
 
+/** 当前脚本版本（与 script.json 保持一致） */
+const SCRIPT_VERSION = '1.2.0'
+
+/** 当前版本更新内容，首次打开该版本时以底部 Sheet 展示一次 */
+const UPDATE_NOTES: string[] = [
+  '设置页「仓库配置」新增「仓库链接」：粘贴 GitHub 链接即自动解析并填入 Owner / Repo / 分支 / 仓库内路径',
+  '支持 github.com/(owner)/(repo)、/tree|blob/分支/路径、省略 tree 的简写链接与 raw.githubusercontent.com 链接',
+  '上传前授权新增 read_contents，可正确判断远端是否已有同名文件（🆕 新建 / 🔄 更新）',
+]
+
+/** 常见默认分支名，用于识别省略 /tree/ 的简写链接 */
+const COMMON_BRANCHES = ['main', 'master', 'dev', 'develop', 'trunk', 'release', 'gh-pages']
+
+/** 仓库页面里的一级路径，出现这些说明链接没有带分支和文件路径 */
+const RESERVED_SEGMENTS = new Set([
+  'releases', 'issues', 'pulls', 'actions', 'wiki', 'settings', 'commits',
+  'tags', 'branches', 'stargazers', 'network', 'forks', 'discussions',
+  'security', 'codespaces', 'archive', 'blame',
+])
+
 const STORAGE_KEYS = {
+  ackedVersion: 'github_ackedVersion',
   owner: 'github_owner',
   repo: 'github_repo',
   branch: 'github_branch',
@@ -74,6 +95,76 @@ function loadString(key: string, fallback: string): string {
   return Storage.get<string>(key) ?? fallback
 }
 
+/** 从 GitHub 链接里解析出来的仓库信息 */
+interface ParsedRepoLink {
+  owner: string
+  repo: string
+  branch: string
+  path: string
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
+  }
+}
+
+/**
+ * 解析 GitHub 仓库链接，支持：
+ * - https://github.com/{owner}/{repo}
+ * - https://github.com/{owner}/{repo}/tree|blob/{branch}/{path}
+ * - https://github.com/{owner}/{repo}/{branch}/{path}（省略 tree 的简写）
+ * - https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}
+ */
+function parseRepoLink(input: string): ParsedRepoLink | null {
+  let text = input.trim()
+  if (!text) return null
+  text = text.split(/[?#]/)[0].replace(/\.git$/i, '').replace(/\/+$/, '')
+  text = text.replace(/^[a-z][a-z0-9+.\-]*:\/\//i, '').replace(/^www\./i, '')
+
+  const isRaw = /^raw\.githubusercontent\.com\//i.test(text)
+  if (!isRaw && !/^github\.com\//i.test(text)) return null
+
+  const segments = text
+    .replace(isRaw ? /^raw\.githubusercontent\.com\//i : /^github\.com\//i, '')
+    .split('/')
+    .filter(Boolean)
+    .map(decodeSegment)
+
+  if (segments.length < 2) return null
+
+  const [owner, repo, ...rest] = segments
+  if (!owner || !repo) return null
+
+  if (isRaw) {
+    if (rest.length === 0) return null
+    const [branch, ...pathSegments] = rest
+    return { owner, repo, branch, path: pathSegments.join('/') }
+  }
+
+  let tail = rest
+  if (tail[0] === 'tree' || tail[0] === 'blob') tail = tail.slice(1)
+  if (tail.length === 0 || RESERVED_SEGMENTS.has(tail[0])) {
+    return { owner, repo, branch: '', path: '' }
+  }
+
+  // 分支名可能带斜杠（feature/xxx），先找常见分支名做切分，找不到就把第一段当分支
+  const commonIndex = tail.findIndex(segment => COMMON_BRANCHES.includes(segment))
+  if (commonIndex > 0) {
+    return {
+      owner,
+      repo,
+      branch: tail.slice(0, commonIndex).join('/'),
+      path: tail.slice(commonIndex + 1).join('/'),
+    }
+  }
+
+  const [branch, ...pathSegments] = tail
+  return { owner, repo, branch, path: pathSegments.join('/') }
+}
+
 // ── Main ──
 
 async function run() {
@@ -81,12 +172,12 @@ async function run() {
 
   if (!availability.available) {
     if (!availability.tokenConfigured) {
-      await alert({
+      await Dialog.alert({
         title: 'GitHub 未配置',
         message: '请在 Settings 中配置 Personal Access Token。\n需要权限：read_profile, read_repos, write_contents',
       })
     } else {
-      await alert({
+      await Dialog.alert({
         title: 'GitHub 不可用',
         message: '此功能需要 Scripting PRO。',
       })
@@ -97,13 +188,14 @@ async function run() {
   const granted = await GitHub.requestPermissions([
     'read_profile',
     'read_repos',
+    'read_contents',
     'write_contents',
   ])
 
   if (granted.length === 0) {
-    await alert({
+    await Dialog.alert({
       title: '权限不足',
-      message: '需要授予 read_profile、read_repos、write_contents 权限才能使用上传功能。',
+      message: '需要授予 read_profile、read_repos、read_contents、write_contents 权限才能使用上传功能。',
     })
     Script.exit()
   }
@@ -112,11 +204,38 @@ async function run() {
   Script.exit()
 }
 
+// ── Update Sheet ──
+
+function UpdateSheet() {
+  return (
+    <VStack
+      spacing={12}
+      padding={{ horizontal: 20, vertical: 24 }}
+      presentationDetents={['medium']}
+      presentationDragIndicator="visible"
+    >
+      <Text font="title3" fontWeight="semibold">Github上传 v{SCRIPT_VERSION}</Text>
+      <Text font={13} foregroundStyle="secondaryLabel">本次更新内容</Text>
+      {UPDATE_NOTES.map((note, index) => (
+        <HStack key={index} spacing={8}>
+          <Image systemName="checkmark.circle.fill" foregroundStyle="systemGreen" font={14} />
+          <Text font={14}>{note}</Text>
+        </HStack>
+      ))}
+    </VStack>
+  )
+}
+
 // ── Upload Page ──
 
 function UploadPage() {
   const dismiss = Navigation.useDismiss()
   const [tabIndex, setTabIndex] = useState(0)
+
+  // ── 版本更新说明（每个版本首次打开时显示一次） ──
+  const [showUpdateSheet, setShowUpdateSheet] = useState(
+    Storage.get<string>(STORAGE_KEYS.ackedVersion) !== SCRIPT_VERSION
+  )
 
   // ── Reactive state ──
   const [owner, setOwner] = useState(loadString(STORAGE_KEYS.owner, ''))
@@ -135,6 +254,8 @@ function UploadPage() {
   const [userInfo, setUserInfo] = useState('')
   const [userAvatar, setUserAvatar] = useState('')
   const [savedToast, setSavedToast] = useState('')
+  const [repoLink, setRepoLink] = useState('')
+  const [parseHint, setParseHint] = useState<{ text: string; ok: boolean } | null>(null)
 
   // ── Load user info ──
   useEffect(() => {
@@ -159,6 +280,45 @@ function UploadPage() {
     Storage.set(STORAGE_KEYS.folderName, folderName)
     Storage.set(STORAGE_KEYS.commitMessage, commitMsg)
     setSavedToast('✅ 设置已保存')
+  }
+
+  // ── 仓库链接解析：粘贴链接即自动填入 Owner / Repo / 分支 / 路径 ──
+  function handleRepoLinkChange(value: string) {
+    setRepoLink(value)
+    const text = value.trim()
+    if (!text) {
+      setParseHint(null)
+      return
+    }
+
+    const parsed = parseRepoLink(text)
+    if (!parsed) {
+      const looksLikeLink = /github/i.test(text) && text.split('/').filter(Boolean).length >= 3
+      setParseHint(looksLikeLink
+        ? { text: '未能识别，支持 github.com/owner/repo 或 github.com/owner/repo/tree/分支/路径', ok: false }
+        : null)
+      return
+    }
+
+    setOwner(parsed.owner)
+    Storage.set(STORAGE_KEYS.owner, parsed.owner)
+    setRepo(parsed.repo)
+    Storage.set(STORAGE_KEYS.repo, parsed.repo)
+    if (parsed.branch) {
+      setBranch(parsed.branch)
+      Storage.set(STORAGE_KEYS.branch, parsed.branch)
+    }
+    setUploadPath(parsed.path)
+    Storage.set(STORAGE_KEYS.uploadPath, parsed.path)
+
+    const detail = [
+      parsed.branch ? `分支 ${parsed.branch}` : '',
+      parsed.path ? `路径 ${parsed.path}` : '',
+    ].filter(Boolean).join(' · ')
+    setParseHint({
+      text: `已解析：${parsed.owner}/${parsed.repo}${detail ? ` · ${detail}` : ''}`,
+      ok: true,
+    })
   }
 
   // ── File handlers ──
@@ -226,7 +386,7 @@ function UploadPage() {
 
     await collectFiles(folderPath)
     if (newItems.length === 0) {
-      await alert({ title: '文件夹为空', message: '所选文件夹中没有可读取的文件。' })
+      await Dialog.alert({ title: '文件夹为空', message: '所选文件夹中没有可读取的文件。' })
       return
     }
     setFiles(prev => {
@@ -261,15 +421,15 @@ function UploadPage() {
   // ── Upload ──
   async function doUpload() {
     if (!owner.trim()) {
-      await alert({ title: '提示', message: '请填写 GitHub 仓库所有者（Owner）' })
+      await Dialog.alert({ title: '提示', message: '请填写 GitHub 仓库所有者（Owner）' })
       return
     }
     if (!repo.trim()) {
-      await alert({ title: '提示', message: '请填写 GitHub 仓库名称（Repo）' })
+      await Dialog.alert({ title: '提示', message: '请填写 GitHub 仓库名称（Repo）' })
       return
     }
     if (files.length === 0) {
-      await alert({ title: '提示', message: '请先选择要上传的文件' })
+      await Dialog.alert({ title: '提示', message: '请先选择要上传的文件' })
       return
     }
 
@@ -381,7 +541,7 @@ function UploadPage() {
       setFiles(prev => prev.filter((_, i) => !successfulIndices.has(i)))
     }
 
-    await alert({
+    await Dialog.alert({
       title: '上传完成',
       message: `✅ 成功: ${successCount} 个\n❌ 失败: ${failCount} 个${copiedFolderUrl ? `\n\n文件夹链接已复制到剪贴板：\n${copiedFolderUrl}` : ''}`,
     })
@@ -400,12 +560,23 @@ function UploadPage() {
 
   // ── Render ──
   return (
-    <NavigationStack>
-      <Toolbar>
-        <ToolbarItem placement="cancellationAction">
-          <Button title="关闭" action={dismiss} />
-        </ToolbarItem>
-      </Toolbar>
+    <NavigationStack
+      sheet={{
+        isPresented: showUpdateSheet,
+        onChanged: (presented: boolean) => {
+          setShowUpdateSheet(presented)
+          if (!presented) Storage.set(STORAGE_KEYS.ackedVersion, SCRIPT_VERSION)
+        },
+        content: <UpdateSheet />,
+      }}
+      toolbar={
+        <Toolbar>
+          <ToolbarItem placement="cancellationAction">
+            <Button title="关闭" action={dismiss} />
+          </ToolbarItem>
+        </Toolbar>
+      }
+    >
       <TabView tabIndex={tabIndex} onTabIndexChanged={setTabIndex}>
         {/* ═══════ 主页 Tab ═══════ */}
         <List
@@ -442,23 +613,9 @@ function UploadPage() {
           ) : null}
 
           {/* 文件选择 */}
-          <Section
-            header={
-              <HStack>
-                <Image systemName="doc.badge.plus" foregroundStyle="systemGreen" font={14} />
-                <Text fontWeight="semibold">选择文件</Text>
-                <Spacer />
-                {files.length > 0 ? <Button title="清除全部" action={clearFiles} /> : null}
-              </HStack>
-            }
-          >
-            <Section header={<Text fontWeight="semibold">单个或多个文件</Text>}>
-              <Button title="选择文件" action={pickFiles} tint="systemBlue" />
-            </Section>
-            <Section header={<Text fontWeight="semibold">整个文件夹</Text>}>
-              <Button title="选择整个文件夹（包含所有子目录）" action={pickFolder} tint="systemGreen" />
-              <Text font={12} foregroundStyle="secondaryLabel">会自动读取文件夹内的所有子文件夹和文件</Text>
-            </Section>
+          <Section>
+            <Button title="选择文件" action={pickFiles} tint="systemBlue" />
+            <Button title="选择文件夹" action={pickFolder} tint="systemGreen" />
             {files.length === 0 ? (
               <Text font={12} foregroundStyle="tertiaryLabel">尚未选择文件</Text>
             ) : (
@@ -474,9 +631,13 @@ function UploadPage() {
                     <Button title="移除" action={() => removeFile(index)} />
                   </HStack>
                 ))}
-                <Text font={12} foregroundStyle="secondaryLabel" padding={{ top: 2 }}>
-                  共 {files.length} 个文件，总计 {formatSize(totalSize)}
-                </Text>
+                <HStack padding={{ top: 2 }}>
+                  <Text font={12} foregroundStyle="secondaryLabel">
+                    共 {files.length} 个文件，总计 {formatSize(totalSize)}
+                  </Text>
+                  <Spacer />
+                  <Button title="清除全部" action={clearFiles} />
+                </HStack>
               </VStack>
             )}
           </Section>
@@ -607,6 +768,18 @@ function UploadPage() {
               </HStack>
             }
           >
+            <TextField title="仓库链接" value={repoLink}
+              onChanged={handleRepoLinkChange} prompt="粘贴 GitHub 链接自动解析" />
+            {parseHint ? (
+              <HStack padding={{ top: 2 }}>
+                <Image
+                  systemName={parseHint.ok ? 'wand.and.stars' : 'exclamationmark.triangle.fill'}
+                  foregroundStyle={parseHint.ok ? 'systemGreen' : 'systemOrange'}
+                  font={12}
+                />
+                <Text font={12} foregroundStyle="secondaryLabel">{parseHint.text}</Text>
+              </HStack>
+            ) : null}
             <TextField title="Owner" value={owner}
               onChanged={(v) => { setOwner(v); saveField(STORAGE_KEYS.owner, v) }} prompt="GitHub 用户名" />
             <TextField title="Repo" value={repo}

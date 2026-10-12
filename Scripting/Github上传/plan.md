@@ -1,11 +1,10 @@
 # Github上传 - Upload Files to GitHub
 
-[安装 Scripting App](https://apps.apple.com/app/apple-store/id6479691128) · [一键导入当前脚本](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting-Script-Library%2Ftree%2Fmain%2FScripting%2FScripts%2FGithub%E4%B8%8A%E4%BC%A0%22%5D)
-
 ## 项目状态
 
 - [x] 编写 `index.tsx` — GitHub 文件上传完整脚本
 - [x] 同名文件自动检测并用 SHA 更新（进度显示 🆕 新建 / 🔄 更新）
+- [x] 设置页支持粘贴 GitHub 链接自动解析 Owner / Repo / 分支 / 路径
 
 ## 项目结构
 
@@ -13,6 +12,7 @@
 Github上传/
 ├── index.tsx     # 主脚本 — GitHub 文件上传设置界面
 ├── script.json   # 项目配置
+├── README.md     # 使用说明 + 版本更新日志
 └── plan.md       # 本文件
 ```
 
@@ -23,13 +23,13 @@ Github上传/
 ### 使用条件
 - 需 Scripting PRO
 - 需在「设置 → GitHub」中配置 Personal Access Token
-- 需要授予 `read_profile`、`read_repos`、`write_contents` 权限
+- 需要授予 `read_profile`、`read_repos`、`read_contents`、`write_contents` 权限
 
 ### index.tsx 功能
 
-1. **仓库配置**：填写 Owner、Repo、Branch（默认 main）、上传路径
+1. **仓库配置**：填写 Owner、Repo、Branch（默认 main）、上传路径；也可以直接粘贴 GitHub 链接（如 `https://github.com/7452323/Scripting/main/Scripting`）自动解析填入
 2. **提交信息**：自定义 Commit Message
-3. **文件选择**：支持多选文件，或通过目录 Bookmark 选择整个文件夹
+3. **文件选择**：主页只保留「选择文件」与「选择文件夹」两个操作
 4. **递归读取**：手动递归所有子目录，保留相对路径和目录结构
 5. **文件管理**：显示相对路径和大小，自动去重，可单个移除或清除全部
 6. **上传**：自动检测文件是否存在（存在则更新），逐文件上传并显示进度

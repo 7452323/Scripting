@@ -15,7 +15,40 @@
 
 登录信息、Cookie 和作品内容可能涉及隐私及平台限制。请仅处理你有权访问和保存的内容，并留意接口变化。
 
+## 文件结构（1.0.23 起）
+
+| 文件 | 作用 |
+|---|---|
+| `shared.tsx` | **全部业务代码**（`HomeView`/`HistoryView`/`SettingsView`/`App`、接口、选档与编码嗅探、下载…）。**无顶层副作用**，两个入口共用 |
+| `index.tsx` | 独立运行入口：`Navigation.present(<App/>)` → 关闭后 `Script.exit()` |
+| `home_screen_default_ui.tsx` | App 首页 Home Tab 入口：**直接渲染作品页**（历史 / 设置 在作品页顶栏） |
+
+⚠️ `index.tsx` 顶层有 `Navigation.present` + `Script.exit` 副作用——**任何文件都不要 `import ... from "./index"`**（会直接弹窗并退出实例；首页会变成「无法渲染此视图」）。要从首页入口取组件，就 `import ... from "./shared"`。
+
 ## 版本更新
+
+### 1.0.25（2026-10-12）
+
+- 首页 Tab 顶栏顺序：**历史 → 刷新 → 设置 → 头像**（刷新与设置调换）
+- 「刷新」由文字按钮改为**图标按钮**（`arrow.clockwise`），三个入口统一
+
+### 1.0.24（2026-10-12）
+
+- 首页 Tab **直接显示作品页**，不再套一层菜单
+- 历史 / 设置 移到作品页顶栏；用 **`homeTab` prop** 传入（**不用 `Script.env`** —— `preview_ui` 里 env 不是 `home_screen`，靠它判断没法验证）
+- 首页不再多包一层 `NavigationStack`（作品页自带，避免嵌套）
+- 首页环境隐藏「关闭」按钮：`dismissApp` 改为可选，不传就不渲染
+
+### 1.0.23（2026-10-12）
+
+新增 App 首页 Home Tab。
+
+- 新增 `home_screen_default_ui.tsx`：`NavigationStack` + 原生 `List`，三个入口（作品 / 历史 / 设置），功能一样不少
+- **不嵌套第二套 TabView** —— 官方约束：完整 App 是 TabView 的脚本，首页要做成**导航入口页**，否则容易「无法渲染此视图」（尤其叠加 `sheet` / `tabViewBottomAccessory` 时）
+- 为此把代码拆成 `shared.tsx`（无副作用、两边共用）+ `index.tsx`（纯入口）
+- 首页环境隐藏「关闭」按钮：`dismissApp` 改为可选，不传就不渲染
+- ⚠️ 坑：`NavigationLink` **自带 chevron**，自己再加一个会出现两个 `›`
+- 打开方式：**设置 → Show Home Tab**（默认关）；改代码后长按 tab bar 的 Home 图标 → **Reload**
 
 ### 1.0.22（2026-10-12）
 

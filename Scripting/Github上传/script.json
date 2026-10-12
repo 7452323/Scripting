@@ -43,7 +43,7 @@
 
   ],
   "entry" : "index.tsx",
-  "version" : "1.0.0",
+  "version" : "1.2.0",
   "name" : "Github上传",
   "color" : "rgba(128, 138, 148,1)"
 }

@@ -1,0 +1,45 @@
+{
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "name" : "7452323",
+    "homepage" : "https://github.com/7452323"
+  },
+  "runInApp" : false,
+  "iconImage" : null,
+  "localizedDescriptions" : {
+    "zh" : "直连红果短剧 App 协议：X-Gorgon 签名取详情与播放地址，CENC 加密流由本机代理边拉边解，原生播放器起播快、可拖动；分集 + 同名跨季自动连播；可整集解密下载到本机离线观看；首页精选橱窗，发现页按频道 / 题材 / 榜单浏览全部内容。",
+    "ja" : "",
+    "ru" : "",
+    "en" : "Native Hongguo short-drama player: signed App API for details and streams, on-device CENC decryption proxy, AVPlayer playback.",
+    "fr" : "",
+    "it" : "",
+    "es" : "",
+    "pt" : "",
+    "de" : ""
+  },
+  "entry" : "index.tsx",
+  "contributors" : [
+
+  ],
+  "version" : "1.27.0",
+  "icon" : "play.tv.fill",
+  "color" : "rgba(255, 149, 0,1)",
+  "remoteResource" : null,
+  "description" : "Browse, search and play Hongguo short dramas: on-device CENC decryption, episode and cross-season continuous playback, and offline downloads.",
+  "localizedNames" : {
+    "zh" : "",
+    "ja" : "",
+    "ru" : "",
+    "en" : "",
+    "fr" : "",
+    "it" : "",
+    "es" : "",
+    "pt" : "",
+    "de" : ""
+  },
+  "intentInputTypes" : [
+
+  ],
+  "name" : "红果短剧",
+  "permissions" : null
+}

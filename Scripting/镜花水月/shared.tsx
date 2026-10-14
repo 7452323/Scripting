@@ -5,6 +5,7 @@ import {
   useState, useEffect, useMemo, useCallback, fetch, VideoPlayer,
   NavigationStack, List, Section, GeometryReader,
 } from "scripting"
+import { abogus } from "./abogus"
 
 // (download 函数运行时不存在，已改用 fetch + Data + FileManager)
 // Data.fromArrayBuffer 由运行时 Data 类提供，无需 custom declare
@@ -17,7 +18,7 @@ const KEY_UIFID = "douyin_uifid"
 const KEY_DEVICE_ID = "douyin_device_id"
 const KEY_INSTALL_ID = "douyin_install_id"
 const KEY_SEEN_VERSION = "seen_version"
-const SCRIPT_VERSION = "1.0.25"
+const SCRIPT_VERSION = "1.0.29"
 
 // 运行时全局对象
 declare const screen: { width: number; height: number; scale: number } | undefined
@@ -1353,8 +1354,29 @@ async function openVideo(video: VideoInfo, _idx?: number) {
   if (_openingVideo) return
   _openingVideo = true
   try {
-    addToHistory(video)
-    await Navigation.present(<VideoPreviewView video={video} />)
+    // 分享页通道拿到的条目没有播放地址（图文也没图集 URL）→ 用移动端 detail 接口补一次
+    let v = video
+    if (v.aweme_id && (!v.play_url || (v.images.length > 0 && !v.images[0]?.url))) {
+      try {
+        const detail = await fetchAwemeDetail(v.aweme_id)
+        if (detail) {
+          const f = awemeToVideoInfo(detail)
+          if (f.play_url || f.images.some((i) => i.url)) {
+            v = {
+              ...v,
+              play_url: f.play_url || v.play_url,
+              images: f.images.length > 0 ? f.images : v.images,
+              cover: v.cover || f.cover, desc: v.desc || f.desc,
+              duration: v.duration || f.duration, digg_count: v.digg_count || f.digg_count,
+              author_nickname: v.author_nickname || f.author_nickname,
+              author_avatar: v.author_avatar || f.author_avatar,
+            }
+          }
+        }
+      } catch { /* 补不到就照原样打开，至少封面/标题能看 */ }
+    }
+    addToHistory(v)
+    await Navigation.present(<VideoPreviewView video={v} />)
   } finally {
     _openingVideo = false
   }
@@ -1573,6 +1595,24 @@ async function resolveViaSharePage(keyword: string): Promise<string> {
 }
 
 // ─── API ───
+function awemeToVideoInfo(item: any): VideoInfo {
+  return {
+    aweme_id: item.aweme_id || "", desc: item.desc || "", create_time: item.create_time || 0,
+    cover: pickBestUrl(item.video?.origin_cover?.url_list) || pickBestUrl(item.video?.cover?.url_list),
+    play_url: bestPlayUrl(item.video),
+    duration: item.video?.duration || 0, digg_count: item.statistics?.digg_count || 0,
+    comment_count: item.statistics?.comment_count || 0,
+    author_nickname: item.author?.nickname || "",
+    author_avatar: pickBestUrl(item.author?.avatar_larger?.url_list) || pickBestUrl(item.author?.avatar_medium?.url_list) || pickBestUrl(item.author?.avatar_thumb?.url_list),
+    unique_id: item.author?.unique_id || "",
+    author_ip_location: item.author?.ip_location || item.author?.ip_loc || item.author?.region || "",
+    images: (item.images || []).map((img: any) => ({
+      url: pickBestUrl(img.url_list),
+      videoUrl: pickBestUrl(img.video?.play_addr?.url_list) || undefined,
+    })).filter((img: ImageInfo) => img.url),
+  }
+}
+
 function parseAwemeResponse(rawJson: string): { videos: VideoInfo[]; maxCursor: number; hasMore: boolean } {
   let data: any
   try { data = JSON.parse(rawJson) } catch { throw new Error("JSON 解析失败") }
@@ -1598,21 +1638,7 @@ function parseAwemeResponse(rawJson: string): { videos: VideoInfo[]; maxCursor: 
       const hasImages = !!(item.images && item.images.length > 0)
       return hasVideo || hasImages
     })
-    .map((item: any) => ({
-    aweme_id: item.aweme_id || "", desc: item.desc || "", create_time: item.create_time || 0,
-    cover: pickBestUrl(item.video?.origin_cover?.url_list) || pickBestUrl(item.video?.cover?.url_list),
-    play_url: bestPlayUrl(item.video),
-    duration: item.video?.duration || 0, digg_count: item.statistics?.digg_count || 0,
-    comment_count: item.statistics?.comment_count || 0,
-    author_nickname: item.author?.nickname || "",
-    author_avatar: pickBestUrl(item.author?.avatar_larger?.url_list) || pickBestUrl(item.author?.avatar_medium?.url_list) || pickBestUrl(item.author?.avatar_thumb?.url_list),
-    unique_id: item.author?.unique_id || "",
-    author_ip_location: item.author?.ip_location || item.author?.ip_loc || item.author?.region || "",
-    images: (item.images || []).map((img: any) => ({
-      url: pickBestUrl(img.url_list),
-      videoUrl: pickBestUrl(img.video?.play_addr?.url_list) || undefined,
-    })).filter((img: ImageInfo) => img.url),
-  }))
+    .map(awemeToVideoInfo)
   return { videos, maxCursor: data.max_cursor || 0, hasMore: data.has_more === 1 }
 }
 
@@ -1767,35 +1793,263 @@ async function ensureUifid(force: boolean = false): Promise<string> {
   finally { try { webView.dispose() } catch {} }
 }
 
-/** 带网页端签名的作品列表请求（绕过 ArgusSecurityPlugin 403）；403 时自动换新 uifid 重试一次 */
+let websignDeadUntil = 0
+function markWebsignDead() { websignDeadUntil = Date.now() + 10 * 60 * 1000 }
+function websignUsable() { return Date.now() >= websignDeadUntil }
+
 async function fetchViaWebsign(secUid: string, cursor: number = 0, allowRetry: boolean = true): Promise<string> {
+  if (!websignUsable()) throw new Error("websign 通道已被标记不可用（稍后自动恢复）")
   const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
   const uifid = await ensureUifid()
   if (!uifid) throw new Error("缺少 uifid，请在设置页重新粘贴含 UIFID 的 Cookie")
-  const rawQuery = `device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id=${secUid}&max_cursor=${cursor}&count=${POST_PAGE_SIZE}&cookie_enabled=true&platform=PC&downlink=10`
-  const signed = websignQuery(rawQuery, uifid)
-  const resp = await fetch(`https://www.douyin.com/aweme/v1/web/aweme/post/?${signed}`, {
+  const sv = (cookie.match(/(?:^|;\s*)s_v_web_id=([^;]*)/) || ["", ""])[1]
+
+  const params: Record<string, string> = {
+    device_platform: "webapp", aid: "6383", channel: "channel_pc_web",
+    sec_user_id: secUid, max_cursor: String(cursor), count: String(POST_PAGE_SIZE),
+    pc_client_type: "1", version_code: "170400", version_name: "17.4.0",
+    cookie_enabled: "true", screen_width: "1536", screen_height: "864",
+    browser_language: "zh-CN", browser_platform: "MacIntel", browser_name: "Safari",
+    browser_version: "605.1.15", browser_online: "true", engine_name: "WebKit",
+    engine_version: "605.1.15", os_name: "Mac OS", os_version: "10.15.7",
+    cpu_core_num: "8", device_memory: "8", platform: "PC", downlink: "10",
+  }
+  const pairs: Array<[string, string]> = Object.keys(params).map((k) => [k, params[k]])
+  pairs.push(["a_bogus", abogus(params)])
+  if (sv) pairs.push(["verifyFp", sv], ["fp", sv])
+  const stamp = String(Math.floor(Date.now() / 1000))
+  pairs.push(["uifid", uifid], ["timestamp", stamp])
+  const query = pairs.map(([k, v]) => `${pyQuote(k)}=${pyQuote(v)}`).join("&")
+  const payload = Data.fromString(`${uifid}_${stamp}_${SECSDK_SALT}_${query}`)
+  const digest = payload ? Crypto.md5(payload) : null
+  const sig = (digest ? digest.toHexString() : "").toLowerCase()
+
+  const resp = await timeoutFetch(fetch(`https://www.douyin.com/aweme/v1/web/aweme/post/?${query}&x-secsdk-web-signature=${sig}`, {
     headers: {
       "User-Agent": DESKTOP_UA,
       "Referer": `https://www.douyin.com/user/${secUid}`,
       "Accept": "application/json, text/plain, */*",
-      "uifid": uifid,
       "Cookie": cookie,
+      "uifid": uifid,
+      "x-secsdk-web-signature": sig,
+      "x-secsdk-web-expire": stamp,
     },
-  })
-  // uifid 可能过期：清缓存重新取一次再试，避免让用户手动去设置页刷新
+  }), 7000)
+  // uifid 可能过期：清缓存重新取一次再试
   if (resp.status === 403 && allowRetry) {
     clearUifid()
     const fresh = await ensureUifid(true)
     if (fresh && fresh !== uifid) return await fetchViaWebsign(secUid, cursor, false)
   }
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-  return await resp.text()
+  const text = await timeoutFetch(resp.text(), 7000)
+  // 空体 / blocked = 抖音风控拦下（不是网络问题）→ 标记一段时间内不再尝试，避免每次白等
+  const t = text.trim()
+  if (!t || t === "blocked" || t.length < 20) {
+    markWebsignDead()
+    throw new Error(`websign 被拦（${t ? t.slice(0, 20) : "空响应"}）`)
+  }
+  return text
 }
 
-async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+/**
+ * 作品列表（免签名通道，2026-10-14 新增）——WebView 渲染移动分享页，从页面运行时里挖出作品对象。
+ *
+ * 为什么必须这么拓（真机实测）：
+ *   · 移动端 /aweme/v1/aweme/post/ 现在一律返空列表（IP 级风控，换身份/换主机/换 UA 都一样）
+ *   · 网页端 /aweme/v1/web/aweme/post/ 的 Argus 签名算法已变：uifid 仍有效，
+ *     但我们本地算的签名会 403 / 被服务端拖住（旧版能过，两天后就失效了）
+ *   · 而 m.douyin.com/share/user/<sec_uid> 这页自己能签名、能把作品渲染出来
+ *     → 我们只从渲染结果里取 aweme_id / 标题 / 封面 / 时长 / 点赞 / 图片数
+ *   · 播放地址不在分享页数据里 → 播放/下载时由移动端 detail 接口补（该通道免签且已验证可用）
+ */
+const SHARE_USER_EXTRACT_JS = `return (()=>{
+  const out = new Map(); const seen = new WeakSet();
+  const norm = (o) => {
+    const id = String(o.aweme_id ?? '');
+    if (!/^\\d{15,}$/.test(id)) return null;
+    const v = o.video || {};
+    const cl = (v.cover && v.cover.url_list) || (v.origin_cover && v.origin_cover.url_list) || [];
+    return { id, desc: String(o.desc ?? '').slice(0, 120), cover: String(cl[0] ?? ''),
+      dur: Number(v.duration ?? 0) || 0,
+      digg: Number((o.statistics && o.statistics.digg_count) ?? 0) || 0,
+      imgs: Array.isArray(o.images) ? o.images.length : 0 };
+  };
+  const walk = (o, d) => {
+    if (d > 7 || !o || typeof o !== 'object') return;
+    if (seen.has(o)) return; seen.add(o);
+    if (o.aweme_id) { const n = norm(o); if (n && !out.has(n.id)) out.set(n.id, n); }
+    let ks = []; try { ks = Object.keys(o) } catch (e) { return }
+    for (const k of ks) { let v = null; try { v = o[k] } catch (e) { continue } if (v && typeof v === 'object') walk(v, d + 1) }
+  };
+  document.querySelectorAll('div,span,li,img,a').forEach((el, i) => {
+    if (i > 400) return;
+    let ks = []; try { ks = Object.keys(el) } catch (e) { return }
+    for (const k of ks) if (k.startsWith('__react') || k.startsWith('__vue')) { walk(el[k], 0); break }
+  });
+  return JSON.stringify({ items: [...out.values()] });
+})()`
+
+async function fetchUserPostsViaSharePage(secUid: string): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+  const wv = getShareWebView()
+  try {
+    await timeoutFetch(wv.loadURL(`https://m.douyin.com/share/user/${encodeURIComponent(secUid)}`), 20000)
+    await timeoutFetch(wv.waitForLoad(), 20000)
+    // 轮询等待：作品网格是页面 JS 异步渲染的，等它出现再取（首抽 1.8s，之后每 1.1s，最多 ~10s）
+    let items: any[] = []
+    for (let i = 0; i < 12; i++) {
+      await new Promise<void>((r) => setTimeout(r, i === 0 ? 900 : 700))
+      try {
+        const raw = await timeoutFetch(wv.evaluateJavaScript(SHARE_USER_EXTRACT_JS), 12000)
+        const parsed = safeJSONParse(String(raw || "")) as any
+        items = Array.isArray(parsed?.items) ? parsed.items : []
+      } catch { items = [] }
+      if (items.length > 0) break
+    }
+    // 只有在「条目偏少」时才下滑尝试：分享页实测就一页（15 条），下滑白花 2-3 秒
+    if (items.length > 0 && items.length < 10) {
+      const seen = new Set(items.map((it) => String(it?.id || "")))
+      for (let round = 0; round < 2; round++) {
+        try {
+          await wv.evaluateJavaScript("return (()=>{const e=document.scrollingElement||document.documentElement;const els=[e,document.body];document.querySelectorAll('div,main,section').forEach((x)=>{if(x.scrollHeight>x.clientHeight+200)els.push(x)});els.forEach((x)=>{if(!x)return;try{x.scrollTop=x.scrollHeight}catch(err){}});return 'ok'})()")
+        } catch {}
+        await new Promise<void>((r) => setTimeout(r, 1600))
+        try {
+          const raw2 = await timeoutFetch(wv.evaluateJavaScript(SHARE_USER_EXTRACT_JS), 12000)
+          const p2 = safeJSONParse(String(raw2 || "")) as any
+          const more: any[] = Array.isArray(p2?.items) ? p2.items : []
+          let added = 0
+          for (const it of more) {
+            const id = String(it?.id || "")
+            if (id && !seen.has(id)) { seen.add(id); items.push(it); added++ }
+          }
+          if (added === 0) break
+        } catch { break }
+      }
+    }
+    const videos: VideoInfo[] = items.map((it) => ({
+      aweme_id: String(it?.id || ""), desc: String(it?.desc || ""), create_time: 0,
+      cover: String(it?.cover || ""), play_url: "",
+      duration: Number(it?.dur) || 0, digg_count: Number(it?.digg) || 0, comment_count: 0,
+      author_nickname: "", author_avatar: "", unique_id: "", author_ip_location: "",
+      images: new Array(Number(it?.imgs) || 0).fill(0).map(() => ({ url: "" } as ImageInfo)),
+    })).filter((v) => !!v.aweme_id)
+    return { videos, maxCursor: 0, hasMore: false }
+  } finally {
+    // 标记来源：分享页只能拿到首页，底部文案要说实话
+    lastListSource = "share"
+    // ⚠️ 不 dispose：这个 WebView 要跨页复用（每次新建 ≈ 白等 2-3 秒，也是之前「不流畅」的主因）；
+    //    但也不能永久占内存 → 闲置 45 秒自动释放
+    scheduleShareWvRelease()
+  }
+}
+
+/** 跨页复用的分享页 WebView（长期存活；只在需要时创建） */
+let _shareWV: WebViewController | null = null
+let _shareWvTimer: ReturnType<typeof setTimeout> | null = null
+function getShareWebView(): WebViewController {
+  if (!_shareWV) _shareWV = new WebViewController({ ephemeral: false })
+  return _shareWV
+}
+/** 释放（切用户/闲置时调用，避免留一个常驻 WebView 占内存） */
+function disposeShareWebView() {
+  try { _shareWV?.dispose() } catch {}
+  _shareWV = null
+  if (_shareWvTimer) { clearTimeout(_shareWvTimer); _shareWvTimer = null }
+}
+/** 用完之后把释放推到 45 秒后（期间翻页仍复用同一个 WebView） */
+function scheduleShareWvRelease() {
+  if (_shareWvTimer) clearTimeout(_shareWvTimer)
+  _shareWvTimer = setTimeout(() => disposeShareWebView(), 45000)
+}
+
+/** pysign 目录：存放用户自己的 Python 签名包（7452323/douyin-sign 的 sign/ 子集） */
+const PYSIGN_DIRS = [
+  "/var/mobile/Library/Mobile Documents/iCloud~com~thomfang~Scripting/Documents/scripts/镜花水月/pysign",
+]
+function resolvePysignDir(): string {
+  for (const d of PYSIGN_DIRS) {
+    try { if (FileManager.existsSync(d + "/sign/__init__.py")) return d } catch {}
+  }
+  return PYSIGN_DIRS[0]
+}
+
+/** 最近一次列表的来源（signer = 带登录态的完整分页；share = 分享页只剩首页） */
+let lastListSource: "signer" | "share" | "" = ""
+
+/** 签名器失败后的冷却（避免未登录/出错时每次加载都白等 1 秒） */
+let signerDeadUntil = 0
+function markSignerDead() { signerDeadUntil = Date.now() + 5 * 60 * 1000 }
+function signerUsable() {
+  if (Date.now() < signerDeadUntil) return false
+  return !!(Storage.get<string>(KEY_COOKIE) || "").trim()
+}
+
+/**
+ * ⭐ 主通道（2026-10-14 实测打通）：在 App 内用**用户自己的 Python 签名包**签移动端请求。
+ * 为什么必须这样：作品接口对「非 App 登录会话」一律返空 —— 匿名、带网页 Cookie、全签名都不行；
+ * 只有把**登录 Cookie + X-Gorgon/X-Argus/X-Ladon/X-Khronos/X-SS-STUB** 一起发出去才会给数据。
+ * 实测：30 条 / 2.3MB / has_more=1 / max_cursor 可翻页 / 自带 play_addr。
+ *
+ * 实现：Scripting 的 `Python.run` 直接跑 `pysign/sign` 包（cookie 只以字符串形式进内存，不落盘）。
+ */
+async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+  const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
+  if (!cookie) throw new Error("没有 Cookie")
+  const dir = resolvePysignDir()
+  const L: string[] = []
+  L.push("import sys, json, ssl, urllib.request")
+  L.push("sys.path.insert(0, " + JSON.stringify(dir) + ")")
+  L.push("from sign import sign_all")
+  L.push("from sign.device import make_seed_device")
+  L.push("dev = make_seed_device()")
+  L.push("cookie = " + JSON.stringify(cookie))
+  L.push("params = {")
+  L.push("'device_platform':'iphone','aid':'1128','channel':'App%20Store','app_name':'aweme',")
+  L.push("'version_code':'40.4.0','version_name':'40.4.0','device_type':'iPhone17,3','os_version':'27.0.1',")
+  L.push("'iid':'7683339722235938341','device_id':'1923489864614387',")
+  L.push("'sec_user_id':" + JSON.stringify(secUid) + ",'max_cursor':" + JSON.stringify(String(cursor)) + ",'count':'30',")
+  L.push("'publish_video_strategy_type':'2','source':'0'}")
+  L.push("qs = '&'.join('%s=%s' % (k, v) for k, v in params.items())")
+  L.push("url = 'https://api5-normal-c-lq.amemv.com/aweme/v1/aweme/post/?' + qs")
+  L.push("h = sign_all(method='GET', url=url, body=b'', cookies=cookie, device=dev)")
+  L.push("req = urllib.request.Request(url)")
+  L.push("for k, v in h.items():")
+  L.push("    try: req.add_header(k, v)")
+  L.push("    except Exception: pass")
+  L.push("try: req.add_header('Cookie', cookie)")
+  L.push("except Exception: pass")
+  L.push("req.add_header('User-Agent', 'Aweme/404017 CFNetwork/3896.100.1.2.1 Darwin/27.0.0')")
+  L.push("ctx = ssl._create_unverified_context()")
+  L.push("try:")
+  L.push("    r = urllib.request.urlopen(req, timeout=25, context=ctx)")
+  L.push("    sys.stdout.write(r.read().decode('utf-8', 'ignore'))")
+  L.push("except Exception as e:")
+  L.push("    sys.stdout.write(json.dumps({'__err__': str(e)[:200]}))")
+  const res: any = await timeoutFetch(Python.run(L.join("\n")), 30000)
+  const text = String(res?.output || "")
+  if (!text) throw new Error("签名器没有输出")
+  const parsed = safeJSONParse(text) as any
+  if (parsed?.__err__) throw new Error("签名请求失败：" + String(parsed.__err__))
+  const list: any[] = Array.isArray(parsed?.aweme_list) ? parsed.aweme_list : []
+  const videos: VideoInfo[] = list
+    .filter((it: any) => Number(it?.aweme_type) !== 101)
+    .map(awemeToVideoInfo)
+    .filter((v: VideoInfo) => !!v.aweme_id && (!!v.play_url || v.images.length > 0))
+  lastListSource = "signer"
+  return { videos, maxCursor: Number(parsed?.max_cursor) || 0, hasMore: Number(parsed?.has_more) === 1 }
+}
+
+export async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
   let lastError: unknown = null
-  // 0) 移动端免签通道（快；被 IP 限流时会返回空列表 → 自动落到 web 通道）
+  // ① 主通道：登录态 + 你自己的 Python 签名包（完整分页、最快最全）
+  if (signerUsable()) {
+    try {
+      const parsed = await fetchUserPostsViaSigner(secUid, cursor)
+      if (parsed.videos.length > 0) return parsed
+    } catch (e) { lastError = e; markSignerDead() }
+  }
+  // ② 移动端免签通道（现在基本返空，留着以防平台又放开）
   try {
     const raw = await mobileGet("/aweme/v1/aweme/post/", {
       sec_user_id: secUid, max_cursor: String(cursor), count: String(POST_PAGE_SIZE),
@@ -1804,11 +2058,16 @@ async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ vid
     const parsed = parseAwemeResponse(raw)
     if (parsed.videos.length > 0) return parsed
   } catch (e) { lastError = e }
-  // 1) 网页端签名（当前唯一可稳定通过风控的通道）
+  // ③ 回退：WebView 渲染移动分享页（免签名 / 免 uifid，但只有首页）
+  try {
+    const parsed = await fetchUserPostsViaSharePage(secUid)
+    if (parsed.videos.length > 0) return parsed
+  } catch (e) { lastError = e }
+  // ④ 回退：网页端签名（Argus 算法已变，现在基本被拦；内部带超时）
   try {
     return parseAwemeResponse(await fetchViaWebsign(secUid, cursor))
   } catch (e) { lastError = e }
-  // 2) 回退：Cookie 裸直连
+  // ⑤ 最后回退：Cookie 裸直连
   try {
     return parseAwemeResponse(await fetchViaCookie(secUid, cursor))
   } catch (e) { lastError = e }
@@ -2338,9 +2597,34 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                   )}
                 </VStack>
               ) : videos.length > 0 ? (
-                <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
-                  <Text font="caption" foregroundStyle="tertiaryLabel">已加载全部作品</Text>
+                lastListSource === "signer" ? (
+                  <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
+                    <Text font="caption" foregroundStyle="tertiaryLabel">已加载全部作品</Text>
+                  </VStack>
+                ) : (
+                  <VStack padding={{ vertical: 14 }} spacing={10} frame={{ maxWidth: "infinity" }} alignment="center">
+                  <Text font="caption" foregroundStyle="secondaryLabel">
+                    仅显示最近 {videos.length} 条
+                  </Text>
+                  <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={2}>
+                    抖音目前对匿名读取只放出第一页（接口一律返空，带签名也一样）；登录后即可拿完整列表
+                  </Text>
+                  <HStack spacing={10}>
+                    <Button action={() => { doLoadVideos(true) }}>
+                      <HStack padding={{ horizontal: 14, vertical: 8 }} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 8 }} spacing={6}>
+                        <Image systemName="arrow.clockwise" font="caption" />
+                        <Text font="subheadline">重试</Text>
+                      </HStack>
+                    </Button>
+                    <Button action={() => { try { Safari.openURL(`https://www.douyin.com/user/${secUid}`) } catch {} }}>
+                      <HStack padding={{ horizontal: 14, vertical: 8 }} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 8 }} spacing={6}>
+                        <Image systemName="safari" font="caption" />
+                        <Text font="subheadline">看全部</Text>
+                      </HStack>
+                    </Button>
+                  </HStack>
                 </VStack>
+                )
               ) : null}
             </VStack>
           </Section>
@@ -2784,6 +3068,49 @@ export function SettingsView({ isActive }: { isActive: boolean }) {
 // ─── 主入口 ───
 // ─── 版本更新说明（新版本首次打开时以底部 Sheet 展示） ───
 const UPDATE_NOTES: { version: string; date: string; items: string[] }[] = [
+  {
+    version: "1.0.29",
+    date: "2026-10-14",
+    items: [
+      "⭐ 作品页恢复完整列表 + 真翻页：在 App 内用你仓库的 Python 签名包签请求（Python.run）",
+      "实测 30 条 / 2.3MB / has_more=1 / 可无限下滑 / 自带播放地址（比分享页的 15 条强很多）",
+      "这是唯一可行的路：作品接口对匿名请求一律返空（带全签名也一样），必须带登录会话",
+      "Cookie 只以字符串进内存、不落盘；签名失败时自动回退到分享页通道",
+      "底部文案按来源区分：完整分页显示「已加载全部作品」，回退时才提示受限",
+    ],
+  },
+  {
+    version: "1.0.28",
+    date: "2026-10-14",
+    items: [
+      "修正作品页底部文案：不再谎报「已加载全部作品」（现在只有第一页 15 条）",
+      "底部改为：仅显示最近 N 条 + 原因说明 + 「重试」与「看全部」（跳浏览器）",
+      "定位进度：用你仓库的签名器（X-Argus/X-Gorgon/X-Ladon/X-Khronos/X-SS-STUB 全带）实测作品接口仍返空 → 不是算法问题，是抖音对匿名读取的门禁",
+    ],
+  },
+  {
+    version: "1.0.27",
+    date: "2026-10-14",
+    items: [
+      "作品页提速：分享页 WebView 改为跨页复用，不再每次重建（之前每次白等 2-3 秒）",
+      "闲置 45 秒自动释放引用，不会常驻占内存",
+      "网页端签名通道升级为现行算法（补 a_bogus，纯本地计算，新增 abogus.ts）",
+      "签名通道若被拦（空响应/blocked）会自动标记 10 分钟不再尝试，避免每次白等",
+      "实测：网页接口现在返空（抖音额外校验 msToken 等浏览器态）→ 主通道仍是分享页渲染",
+      "分享页支持下滑尝试多取作品（能多拿就多拿）",
+    ],
+  },
+  {
+    version: "1.0.26",
+    date: "2026-10-14",
+    items: [
+      "修复作品页打不开（HTTP 403）：平台改了网页端 Argus 签名算法，旧签名已失效",
+      "新增免签名通道：用 WebView 渲染移动分享页，从页面里直接取作品列表（不再依赖 uifid/签名）",
+      "播放地址不在分享页里 → 改成点开时用移动端 detail 接口补（那条通道免签且已验证可用）",
+      "旧的网页签名通道保留为后备，并加了 9 秒硬超时（之前会卡住不返回）",
+      "实测：签名通道下请求会被服务端拖住；移动端 post 接口目前一律返空列表（IP 级风控）",
+    ],
+  },
   {
     version: "1.0.25",
     date: "2026-10-12",

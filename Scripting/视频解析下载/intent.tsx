@@ -11,6 +11,16 @@ import {
   ProgressView, fetch, useState, useEffect, useRef,
   Script, Intent
 } from "scripting"
+import {
+  buildDouyinDownloadCandidates,
+  parseDouyinViaMobile,
+} from "./douyin"
+import { parseInstagramPost } from "./instagram"
+import { parseXhsNote } from "./xiaohongshu"
+import { parseYouTubeVideo } from "./youtube"
+import { parseKuaishou } from "./kuaishou"
+import { parseWeChatArticle } from "./wechat"
+import { parseWxChannels } from "./wxchannels"
 
 declare const Pasteboard: {
   getString(): Promise<string | null>
@@ -32,10 +42,13 @@ interface MediaResult {
   title?: string
   author?: string
   video_url?: string | null
+  videoUrls?: string[]
+  audio_url?: string | null
   images?: string[]
   cover_url?: string | null
   link?: string
   error?: string
+  debug?: string[]
 }
 
 // ─── 平台检测 ──────────────────────────────────────────
@@ -43,11 +56,14 @@ interface MediaResult {
 const PLATFORMS: [string, RegExp[]][] = [
   ['douyin',      [/douyin\.com/i, /iesdouyin/i, /v\.douyin/i]],
   ['twitter',     [/twitter\.com/i, /x\.com\//i]],
-  ['xiaohongshu', [/xiaohongshu\.com/i, /xhslink\.com/i]],
+  ['xiaohongshu', [/xiaohongshu\.com/i, /xhslink\.(?:com|cn)/i, /xhs\.link/i]],
   ['instagram',   [/instagram\.com/i]],
   ['bilibili',    [/bilibili\.com/i, /b23\.tv/i]],
   ['tiktok',      [/tiktok\.com/i]],
-  ['kuaishou',    [/kuaishou\.com/i]],
+  ['kuaishou',    [/kuaishou\.com/i, /chenzhongtech\.com/i]],
+  ['youtube',     [/youtube\.com/i, /youtu\.be/i]],
+  ['wxchannels',  [/weixin\.qq\.com\/sph\//i, /channels\.weixin\.qq\.com/i]],
+  ['wechat',      [/mp\.weixin\.qq\.com\/s/i]],
 ]
 
 function extractFirstURL(text: string): string | null {
@@ -119,9 +135,36 @@ async function parseDouyin(url: string): Promise<MediaResult> {
   result.platform = 'douyin'; result.link = url
   try {
     let targetUrl = url
+    let mobileFailure = ''
+
+    // ① 移动端免签通道（主通道：模块自带短链展开 / 多主机重试 / 逐步诊断）
+    try {
+      const mobile = await parseDouyinViaMobile(url)
+      if (mobile.success) {
+        result.title = mobile.title
+        result.author = mobile.author
+        result.cover_url = mobile.cover_url || null
+        if (mobile.images?.length) result.images = mobile.images
+        if (mobile.video_url) {
+          result.video_url = mobile.video_url
+          result.videoUrls = mobile.videoUrls
+        }
+        result.success = true
+        result.debug = mobile.debug
+        return result
+      }
+      mobileFailure = mobile.error || '移动端通道未返回可下载内容'
+    } catch (error) {
+      mobileFailure = error instanceof Error ? error.message : String(error)
+    }
+
+    // ② 短链展开（给下面的网页兜底用）
     if (url.match(/v\.douyin\.com/i)) {
-      const resp = await fetch(url, { headers: { 'User-Agent': UA }, timeout: 10 })
-      targetUrl = resp.headers.get('location') || resp.headers.get('Location') || url
+      try {
+        const resp = await fetch(url, { headers: { 'User-Agent': UA }, timeout: 10 })
+        const finalUrl = (resp as any).url || resp.headers.get('location') || resp.headers.get('Location') || url
+        if (finalUrl && !finalUrl.match(/v\.douyin\.com/i)) targetUrl = finalUrl
+      } catch {}
     }
 
     try {
@@ -135,9 +178,13 @@ async function parseDouyin(url: string): Promise<MediaResult> {
           if (item) {
             result.title = item.desc || ''; result.author = item.author?.nickname || ''
             result.cover_url = item.video?.cover?.url_list?.[0] || item.video?.origin_cover?.url_list?.[0] || ''
-            const urls = item.video?.play_addr?.url_list || []
-            if (urls.length) { result.video_url = urls[0].replace(/playwm/g, 'play'); result.success = true }
-            return result
+            const candidates = item.video ? buildDouyinDownloadCandidates(item.video) : []
+            if (candidates.length) {
+              result.videoUrls = candidates.map((c) => c.url)
+              result.video_url = candidates[0].url
+              result.success = true
+              return result
+            }
           }
         } catch {}
       }
@@ -164,13 +211,19 @@ async function parseDouyin(url: string): Promise<MediaResult> {
       if (item) {
         result.title = item.desc || ''; result.author = item.author?.nickname || ''
         result.cover_url = item.video?.cover?.url_list?.[0] || item.video?.origin_cover?.url_list?.[0] || ''
-        for (const key of ['play_addr', 'play_addr_h264']) {
-          const urls = (item.video as any)[key]?.url_list || []
-          if (urls.length) { result.video_url = urls[0].replace(/playwm/g, 'play'); result.success = true; break }
+        const candidates = item.video ? buildDouyinDownloadCandidates(item.video) : []
+        if (candidates.length) {
+          result.videoUrls = candidates.map((c) => c.url)
+          result.video_url = candidates[0].url
+          result.success = true
         }
       }
     } finally { webView.dispose() }
-    if (!result.success) result.error = '无法从页面提取视频'
+    if (!result.success && !result.error) {
+      result.error = mobileFailure
+        ? `移动端免签通道失败：${mobileFailure}；页面兜底也没有取到地址`
+        : '无法从页面提取视频'
+    }
   } catch (e: any) { result.error = e.message || String(e) }
   return result
 }
@@ -191,10 +244,133 @@ async function parseGeneric(url: string): Promise<MediaResult> {
   return result
 }
 
+async function parseInstagramIntent(url: string): Promise<MediaResult> {
+  let cookie = ""
+  try {
+    const raw = Storage.get<string>("clearmark_cookies_v1") || "{}"
+    cookie = (JSON.parse(raw)?.instagram || "").trim()
+  } catch {}
+  const r = await parseInstagramPost(url, cookie)
+  return {
+    success: r.success,
+    platform: "instagram",
+    title: r.title,
+    author: r.author,
+    video_url: r.video_url,
+    videoUrls: r.videoUrls,
+    images: r.images,
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
+async function parseXiaohongshuIntent(url: string): Promise<MediaResult> {
+  let cookie = ""
+  try {
+    const raw = Storage.get<string>("clearmark_cookies_v1") || "{}"
+    cookie = (JSON.parse(raw)?.xiaohongshu || "").trim()
+  } catch {}
+  const r = await parseXhsNote(url, cookie)
+  return {
+    success: r.success,
+    platform: "xiaohongshu",
+    title: r.title,
+    author: r.author,
+    video_url: r.video_url,
+    videoUrls: r.videoUrls,
+    images: r.images,
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
+/** 分享面板轻量包装：读 Storage 里的平台 Cookie，转发给项目模块 */
+async function cookieFor(platform: string): Promise<string> {
+  try {
+    const raw = Storage.get<string>("clearmark_cookies_v1") || "{}"
+    return (JSON.parse(raw)?.[platform] || "").trim()
+  } catch {
+    return ""
+  }
+}
+
+async function parseYouTubeIntent(url: string): Promise<MediaResult> {
+  const r = await parseYouTubeVideo(url, await cookieFor("youtube"))
+  return {
+    success: r.success,
+    platform: "youtube",
+    title: r.title,
+    author: r.author,
+    // 分享面板不做合轨：有 progressive 单文件就用它（自带声音）
+    video_url: r.progressive_url || r.video_url,
+    videoUrls: [r.progressive_url || r.video_url || ""].filter(Boolean),
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
+async function parseKuaishouIntent(url: string): Promise<MediaResult> {
+  const r = await parseKuaishou(url, await cookieFor("kuaishou"))
+  return {
+    success: r.success,
+    platform: "kuaishou",
+    title: r.title,
+    author: r.author,
+    video_url: r.video_url,
+    videoUrls: r.videoUrls,
+    images: r.images,
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
+async function parseWeChatIntent(url: string): Promise<MediaResult> {
+  const r = await parseWeChatArticle(url, await cookieFor("wechat"))
+  return {
+    success: r.success,
+    platform: "wechat",
+    title: r.title,
+    author: r.author,
+    video_url: r.video_url,
+    videoUrls: r.videoUrls,
+    images: r.images,
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
+async function parseWxChannelsIntent(url: string): Promise<MediaResult> {
+  const r = await parseWxChannels(url, await cookieFor("wxchannels"))
+  return {
+    success: r.success,
+    platform: "wxchannels",
+    title: r.title,
+    author: r.author,
+    video_url: r.video_url,
+    videoUrls: r.videoUrls,
+    cover_url: r.cover_url,
+    link: r.link || url,
+    error: r.error,
+    debug: r.debug,
+  }
+}
+
 const PARSERS: Record<string, (url: string) => Promise<MediaResult>> = {
   douyin: parseDouyin, twitter: parseTwitter,
-  xiaohongshu: parseGeneric, instagram: parseGeneric,
-  bilibili: parseGeneric, tiktok: parseGeneric, kuaishou: parseGeneric,
+  xiaohongshu: parseXiaohongshuIntent, instagram: parseInstagramIntent,
+  bilibili: parseGeneric, tiktok: parseGeneric,
+  kuaishou: parseKuaishouIntent, youtube: parseYouTubeIntent,
+  wechat: parseWeChatIntent, wxchannels: parseWxChannelsIntent,
 }
 
 async function parse(url: string): Promise<MediaResult> {
@@ -213,28 +389,43 @@ function safeFileName(input: string | undefined, fallback: string): string {
   return (input || fallback).trim().replace(/[\/:*?"<>|\n\r]+/g, '_').slice(0, 80) || fallback
 }
 
-async function saveVideo(videoUrl: string, title?: string, link?: string): Promise<string> {
-  const resp = await fetch(videoUrl, {
-    method: 'GET', timeout: 300,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15',
-      'Referer': link || '',
+async function saveVideo(videoUrl: string, title?: string, link?: string, candidates?: string[], platform?: string): Promise<string> {
+  const list = [videoUrl, ...(candidates || [])].filter((u, i, arr) => !!u && arr.indexOf(u) === i)
+  const headersFor = (u: string): Record<string, string> => platform === 'douyin' || u.includes('douyinvod') || u.includes('/aweme/v1/play/')
+    ? {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://www.douyin.com/',
+        'Accept': '*/*',
+      }
+    : { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15', 'Referer': link || '' }
+
+  let lastError = '所有下载候选均失败'
+  for (const url of list.slice(0, 10)) {
+    try {
+      const resp = await fetch(url, { method: 'GET', timeout: 300, headers: headersFor(url) })
+      if (!resp.ok) { lastError = `HTTP ${resp.status}`; continue }
+      const mime = (resp as any).mimeType || ''
+      if (mime && !mime.startsWith('video/') && !mime.startsWith('image/') && mime !== 'application/octet-stream') {
+        if (mime.startsWith('text/') || mime.includes('json') || mime.includes('javascript')) { lastError = `不支持的响应类型 ${mime}`; continue }
+      }
+      const ab = await resp.arrayBuffer()
+      const data = Data.fromArrayBuffer(ab)
+      if (!data || (data as any).size < 1024) { lastError = '下载数据为空或过小'; continue }
+      const baseName = safeFileName(title, `video_${Date.now()}`)
+      const fileName = baseName.toLowerCase().endsWith('.mp4') ? baseName : baseName + '.mp4'
+      const destPath = FileManager.documentsDirectory + '/' + fileName
+      try { FileManager.removeSync(destPath) } catch {}
+      await FileManager.writeAsBytes(destPath, data)
+      const saved = await Photos.saveVideo(destPath, { fileName, shouldMoveFile: false })
+      if (saved) return '视频已保存到系统相册'
+      const savedSimple = await (Photos as any).saveVideo(destPath)
+      if (savedSimple === true || savedSimple == null) return '视频已保存到系统相册'
+      lastError = '保存到相册失败'
+    } catch (e: any) {
+      lastError = e?.message || String(e)
     }
-  })
-  if (!resp.ok) throw new Error(`下载失败: HTTP ${resp.status}`)
-  const ab = await resp.arrayBuffer()
-  const data = Data.fromArrayBuffer(ab)
-  if (!data) throw new Error('下载数据为空')
-  const baseName = safeFileName(title, `video_${Date.now()}`)
-  const fileName = baseName.toLowerCase().endsWith('.mp4') ? baseName : baseName + '.mp4'
-  const destPath = FileManager.documentsDirectory + '/' + fileName
-  try { FileManager.removeSync(destPath) } catch {}
-  await FileManager.writeAsBytes(destPath, data)
-  const saved = await Photos.saveVideo(destPath, { fileName, shouldMoveFile: false })
-  if (saved) return '视频已保存到系统相册'
-  const savedSimple = await (Photos as any).saveVideo(destPath)
-  if (savedSimple === true || savedSimple == null) return '视频已保存到系统相册'
-  throw new Error('保存到相册失败')
+  }
+  throw new Error(`下载失败: ${lastError}`)
 }
 
 // ─── Intent 解析 ───────────────────────────────────────
@@ -309,7 +500,7 @@ function IntentDownloadView(props: { url: string }) {
           setStatus('下载视频中...')
           appendLog('开始下载视频...')
 
-          const msg = await saveVideo(r.video_url, r.title, r.link)
+          const msg = await saveVideo(r.video_url, r.title, r.link, r.videoUrls, detected.platform)
 
           setProgress({ fraction: 1, stage: '全部完成' })
           setStatus(msg)

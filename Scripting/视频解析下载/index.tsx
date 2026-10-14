@@ -8,16 +8,36 @@
  * 3. 运行即可
  * 
  * 支持: 抖音 / Twitter / 小红书 / Instagram / Bilibili
+ *
+ * 更新：
+ * - 抖音解析/下载改走移动端免签通道（参考「镜花水月」），彻底去掉水印并拿到最高画质
+ * - 界面交互与布局对齐「Media Downloader」
  */
 
 import {
   Text, TextField, Button, List, Section, HStack, VStack, ZStack,
   Image, Rectangle, Spacer,
   NavigationStack, Navigation, ScrollView, ScrollViewReader, LazyVGrid,
-  ProgressView, Tab, TabView,
+  ProgressView, Tab, TabView, DirectoryBrowserView,
   fetch, useState, useEffect, useRef, useObservable,
   Script, Intent
 } from "scripting"
+import {
+  DY_DOWNLOAD_UA,
+  buildDouyinDownloadCandidates,
+  extractDouyinId,
+  fetchDouyinDetailMobile,
+  parseDouyinViaMobile,
+} from "./douyin"
+import { IG_PAGE_UA, instagramShortcode, parseInstagramPost } from "./instagram"
+import { parseBilibiliVideo, qnLabel } from "./bilibili"
+import { parseXhsNote } from "./xiaohongshu"
+import { parseYouTubeVideo } from "./youtube"
+import { parseKuaishou } from "./kuaishou"
+import { parseWeChatArticle } from "./wechat"
+import { parseWxChannels } from "./wxchannels"
+import { downloadToFile } from "./download"
+import { muxVideoAudio, removeQuietly } from "./mux"
 
 declare function alert(message: string): Promise<void>
 declare function alert(options: { message: string; title?: string; buttonLabel?: string }): Promise<void>
@@ -33,6 +53,10 @@ declare const Photos: {
 declare const FileManager: {
   documentsDirectory: string
   temporaryDirectory: string
+  exists(path: string): Promise<boolean>
+  remove(path: string): Promise<void>
+  readDirectory(path: string, recursive?: boolean): Promise<string[]>
+  isFile(path: string): Promise<boolean>
   writeAsBytes(path: string, data: Data): Promise<void>
   removeSync(path: string): void
 }
@@ -40,6 +64,11 @@ declare const openURL: (url: string) => Promise<boolean>
 
 declare const ShareSheet: {
   present(items: any[]): Promise<boolean>
+}
+
+declare const QuickLook: {
+  previewURLs(paths: string[], fullscreen?: boolean): Promise<boolean>
+  preview(path: string): Promise<boolean>
 }
 
 declare const Dialog: {
@@ -80,15 +109,21 @@ interface MediaResult {
   videoUrls?: string[]
   /** 抖音视频 URI（play_addr.uri），用于通过 aweme.snssdk.com 获取指定画质 */
   videoUri?: string
+  /** 独立音频轨（自适应流；需与视频轨合轨后才有声音） */
+  audio_url?: string | null
   debug?: string[]
 }
 
 const PLATFORMS: [string, RegExp[]][] = [
   ['douyin',      [/douyin\.com/i, /iesdouyin/i, /v\.douyin/i]],
   ['twitter',     [/twitter\.com/i, /x\.com\//i]],
-  ['xiaohongshu', [/xiaohongshu\.com/i, /xhslink\.com/i]],
+  ['xiaohongshu', [/xiaohongshu\.com/i, /xhslink\.(?:com|cn)/i, /xhs\.link/i]],
   ['instagram',   [/instagram\.com/i]],
   ['bilibili',    [/bilibili\.com/i, /b23\.tv/i]],
+  ['youtube',     [/youtube\.com/i, /youtu\.be/i]],
+  ['kuaishou',    [/kuaishou\.com/i, /chenzhongtech\.com/i]],
+  ['wxchannels',  [/weixin\.qq\.com\/sph\//i, /channels\.weixin\.qq\.com/i]],
+  ['wechat',      [/mp\.weixin\.qq\.com\/s/i]],
 ]
 
 function detectPlatform(text: string): { platform: string; url: string } | null {
@@ -269,21 +304,6 @@ async function parseTwitter(url: string): Promise<MediaResult> {
 
 // ─── 抖音辅助函数 ───
 
-/** 从抖音 URL 提取视频 ID */
-function extractDouyinId(url: string): string | null {
-  const patterns = [
-    /(?:douyin|iesdouyin)\.com\/(?:share\/)?(?:video|note|slides|playlist)\/([0-9]+)/i,
-    /(?:iesdouyin|douyin)\.com\/video\/([0-9]+)/i,
-    /aweme_id[=:]([0-9]+)/i,
-    /\/video\/([0-9]+)/i,
-    /modal_id=([0-9]+)/i,
-  ]
-  for (const p of patterns) {
-    const m = url.match(p)
-    if (m && m[1]) return m[1]
-  }
-  return null
-}
 
 /** 抖音内部 API 策略：直接 fetch 调用 /aweme/v1/web/aweme/detail/（比 WebView 更可靠） */
 async function douyinDirectAPIStrategy(awemeId: string, cookie: string): Promise<MediaResult | null> {
@@ -615,8 +635,9 @@ async function get1080pUrlFromUri(
   if (cookie) baseHeaders['Cookie'] = cookie
 
   const ratios = ['1080p']  // 只试 1080p，不降级
-  // 恢复原版 3 host 策略（snssdk → api.douyin → iesdouyin，各 10s）
+  // 2026-10-13 更新：加回移动端播放主机 api-play（实测 302 到 douyinvod CDN 直链，可用）
   const hosts = [
+    { url: (uri: string, r: string) => `https://api-play.amemv.com/aweme/v1/play/?video_id=${uri}&ratio=${r}&line=0`, label: 'api-play' },
     { url: (uri: string, r: string) => `https://aweme.snssdk.com/aweme/v1/play/?video_id=${uri}&ratio=${r}&line=0`, label: 'snssdk' },
     { url: (uri: string, r: string) => `https://api.douyin.com/aweme/v1/play/?video_id=${uri}&ratio=${r}&line=0`, label: 'api.douyin' },
     { url: (uri: string, r: string) => `https://www.iesdouyin.com/aweme/v1/play/?video_id=${uri}&ratio=${r}&line=0&is_play_url=1&watermark=0&source=PackSourceEnum_PUBLISH`, label: 'iesdouyin' },
@@ -645,10 +666,10 @@ async function get1080pUrlFromUri(
 }
 
 // ─── 抖音 ──────────────────────────────────────────────
-// 多策略解析：WebView JS 注入（主）→ 直接 API fetch（备用）→ HTML 兜底
+// 多策略解析：移动端免签接口（主）→ WebView JS 注入 → 网页 API → HTML 兜底
 async function parseDouyin(url: string): Promise<MediaResult> {
   const result: MediaResult = { success: false, error: '' }
-  const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+  const UA = DY_DOWNLOAD_UA
   result.platform = 'douyin'
   result.link = url
 
@@ -661,13 +682,13 @@ async function parseDouyin(url: string): Promise<MediaResult> {
 
   // ── 展开短链接 ──
   let targetUrl = url
-  if (url.match(/v\\.douyin\\.com/i) || url.match(/v\\.douyin/i)) {
+  if (url.match(/v\.douyin\.com/i) || url.match(/v\.douyin/i)) {
     try {
       const fetchHeaders: Record<string, string> = { 'User-Agent': UA }
       if (dyCookie) fetchHeaders['Cookie'] = dyCookie
       const resp = await fetch(url, { headers: fetchHeaders, timeout: 8 })
       const finalUrl = (resp as any).url || ''
-      if (finalUrl && finalUrl !== url && !finalUrl.match(/v\\.douyin\\.com/i)) {
+      if (finalUrl && finalUrl !== url && !finalUrl.match(/v\.douyin\.com/i)) {
         targetUrl = finalUrl
         const newId = extractDouyinId(finalUrl)
         if (newId) awemeId = newId
@@ -714,7 +735,7 @@ async function parseDouyin(url: string): Promise<MediaResult> {
     result.title = result.title || item.desc || ''
     result.author = result.author || item.author?.nickname || ''
     const rawVid = String(item.aweme_id || item.video_id || '')
-    result.videoId = /^\\d+$/.test(rawVid) ? rawVid : ''
+    result.videoId = /^\d+$/.test(rawVid) ? rawVid : ''
     const hasRealVideo = item.video?.play_addr?.url_list?.length && item.video.play_addr.url_list.some(function(u: string) { return u.includes('/play/') || u.includes('playwm'); })
     const isImagePost = (!hasRealVideo && item.aweme_type === 2) || (item.images?.length > 0 && !item.video?.bit_rate?.length) || (item.video?.play_addr?.url_list?.length && item.video.play_addr.url_list.every(function(u: string) { return u.includes('douyinpic.com') || u.includes('.webp'); }))
     const v = item.video || {}
@@ -742,10 +763,39 @@ async function parseDouyin(url: string): Promise<MediaResult> {
   }
 
   // ════════════════════════════════════════════════════════
-  // 策略 1: 直接 API fetch（最快！~1s）→ get1080pUrlFromUri 画质升级
+  // 策略 0: 移动端免签通道（主通道：免签名 / 免 Cookie / 无水印直链）
+  //   实现与诊断都在 ./douyin 模块里，模块自己会展开短链、多主机重试
+  // ════════════════════════════════════════════════════════
+  let mobileFailure = ""
+  try {
+    const mobile = await parseDouyinViaMobile(targetUrl || url, dyCookie)
+    if (mobile.success) {
+      const mapped: MediaResult = {
+        success: true,
+        platform: "douyin",
+        title: mobile.title,
+        author: mobile.author,
+        video_url: mobile.video_url,
+        videoUrls: mobile.videoUrls,
+        videoUri: mobile.videoUri,
+        images: mobile.images,
+        imagePreviews: mobile.imagePreviews,
+        cover_url: mobile.cover_url,
+        link: mobile.link,
+        videoId: mobile.videoId,
+        debug: mobile.debug,
+      }
+      return mapped
+    }
+    mobileFailure = mobile.error || "移动端通道未返回可下载内容"
+  } catch (error) {
+    mobileFailure = error instanceof Error ? error.message : String(error)
+  }
+
+  // ════════════════════════════════════════════════════════
+  // 策略 1: 网页端 API fetch（2026-10 起常被 Argus 风控拦，仅作兜底）
   // ════════════════════════════════════════════════════════
   if (awemeId) {
-    // 优先尝试直接 API（无需 WebView，1 次 fetch 即可）
     const directResult = await douyinDirectAPIStrategy(awemeId, dyCookie)
     if (directResult && directResult.success) {
       return directResult
@@ -798,7 +848,7 @@ async function parseDouyin(url: string): Promise<MediaResult> {
     }
 
     // 3b. SSR 水合数据
-    const ssrMatch = html.match(/window\\._SSR_HYDRATADATA\\s*=\\s*({.+?});\\n*<\/script>/s)
+    const ssrMatch = html.match(/window\._SSR_HYDRATADATA\s*=\s*({.+?});\n*<\/script>/s)
     if (ssrMatch) {
       try {
         const ssr = JSON.parse(ssrMatch[1])
@@ -1035,7 +1085,11 @@ async function parseDouyin(url: string): Promise<MediaResult> {
     }
   }
 
-  if (!result.success && !result.error) result.error = '无法从抖音页面提取视频，请重试'
+  if (!result.success && !result.error) {
+    result.error = mobileFailure
+      ? `移动端免签通道失败：${mobileFailure}；页面兜底也没有取到地址`
+      : "无法从抖音页面提取视频，请重试"
+  }
   return result
 }
 
@@ -1053,1707 +1107,266 @@ function tryParseJSON(text: string | null | undefined): any {
 // ─── 小红书辅助函数（参考 Unmark/LZY-Ricardo） ───
 
 /** 从 URL 提取 24 位笔记 ID */
-function extractNoteId(url: string): string | null {
-  const patterns = [
-    /\/explore\/([a-f0-9]{24})/i,
-    /\/discovery\/item\/([a-f0-9]{24})/i,
-    /\/item\/([a-f0-9]{24})/i,
-  ]
-  for (const p of patterns) {
-    const m = url.match(p)
-    if (m && m[1]) return m[1]
-  }
-  return null
-}
-
-/** 绝对 URL 拼接 */
-function absolutizeUrl(base: string, maybeRelative: string): string {
-  try { return new URL(maybeRelative, base).toString() } catch { return maybeRelative }
-}
-
-/** 从文本提取小红书 URL */
-function extractXhsUrlFromText(text: string): string {
-  if (!text) return ''
-  const patterns = [
-    /(?:window\.location(?:\.href|\.replace)?\s*=\s*|location\.replace\()\s*[\'"]([^\'"]+)[\'"]/i,
-    /https?:\/\/(?:www\.)?xiaohongshu\.com\/(?:explore|discovery\/item|item|sns\/note)\/[a-zA-Z0-9]+[^\s\'"<>]*/i,
-  ]
-  for (const p of patterns) {
-    const m = text.match(p)
-    if (m) {
-      let v = (m[1] || m[0] || '').trim()
-      try { v = decodeURIComponent(v) } catch {}
-      if (v.includes('xiaohongshu.com/explore/') || v.includes('xiaohongshu.com/item/') || v.includes('xiaohongshu.com/discovery/')) return v
-    }
-  }
-  return ''
-}
-
-/** 解析 HTML 中的 __INITIAL_STATE__ JSON */
-function extractInitialState(html: string): Record<string, any> | null {
-  const markers = ['window.__INITIAL_STATE__=', 'window.__INITIAL_STATE__ = ', 'window.__INITIAL_SSR_STATE__=']
-  for (const marker of markers) {
-    const idx = html.indexOf(marker)
-    if (idx === -1) continue
-    const jsonStart = html.indexOf('{', idx + marker.length)
-    if (jsonStart === -1) continue
-    let bracketCount = 0, inString = false, escaped = false
-    for (let i = jsonStart; i < html.length; i++) {
-      const ch = html[i]
-      if (escaped) { escaped = false; continue }
-      if (ch === '\\') { escaped = true; continue }
-      if (ch === '"') { inString = !inString; continue }
-      if (inString) continue
-      if (ch === '{') { bracketCount++; continue }
-      if (ch === '}') {
-        bracketCount--
-        if (bracketCount === 0) {
-          const jsonText = html.slice(jsonStart, i + 1).replace(/:\s*undefined(?=[,}])/g, ':null')
-          try { return JSON.parse(jsonText) } catch { continue }
-        }
-      }
-    }
-  }
-  return null
-}
-
-/** 在 __INITIAL_STATE__ 中搜索目标笔记 */
-function findNoteData(init: Record<string, any>, noteId: string): Record<string, any> | null {
-  // ParseHub 快捷路径：data.note.firstNoteId → noteDetailMap[id].note（直接命中，无需评分）
-  const firstNoteId = get(init, ['note', 'firstNoteId'])
-  if (firstNoteId && String(firstNoteId).toLowerCase() === noteId.toLowerCase()) {
-    const direct = get(init, ['note', 'noteDetailMap', noteId, 'note'])
-    if (direct && typeof direct === 'object') return direct
-  }
-  // 候选搜索（兼容不同数据结构）
-  const candidates: any[] = [
-    get(init, ['note', 'noteDetailMap', noteId, 'note']),
-    get(init, ['note', 'noteDetailMap', noteId, 'note', 'noteCard']),
-    get(init, ['note', 'noteDetailMap', noteId]),
-    get(init, ['noteData', 'noteData', 'note']),
-    get(init, ['noteData', 'data', 'note']),
-    get(init, ['note', 'noteData', 'note']),
-  ]
-  let best: Record<string, any> | null = null, bestScore = 0
-  for (const c of candidates) {
-    if (!c || typeof c !== 'object') continue
-    let score = 0
-    const id = c.noteId || c.note_id || c.id
-    if (id && String(id).toLowerCase() === noteId.toLowerCase()) score += 6
-    if (c.imageList?.length || c.images?.length) score += 4
-    if (c.video?.media?.stream || c.video?.url) score += 4
-    if (c.title || c.desc) score += 1
-    if (c.user || c.nickname) score += 1
-    if (c.noteCard) score += 2
-    if (score > bestScore) { bestScore = score; best = c }
-  }
-  return bestScore >= 7 ? best : null
-}
-
-function get(obj: any, keys: string[]): any {
-  let cur = obj
-  for (const k of keys) {
-    if (!cur || typeof cur !== 'object' || !(k in cur)) return null
-    cur = cur[k]
-  }
-  return cur
-}
-
-function getXhsPreviewImageUrl(rawUrl: string): string {
-  return getRawImageUrl(rawUrl)
-}
-
-function getRawImageUrl(imgUrl: string): string {
-  if (!imgUrl) return ''
-  const clean = imgUrl.split('?')[0].split('@')[0].replace(/\\u002F/g, '/')
-  const specMatch = clean.match(/\/(spectrum|note_pre_post_uhdr|notes_pre_post|notes_uhdr)\/([^/!]+)(?:!.*)?$/)
-  if (specMatch) return `https://sns-img-hw.xhscdn.com/${specMatch[1]}/${specMatch[2]}`
-  return clean.replace(/![^/]*$/, '')
-}
-
-function isLikelyXhsNoteImageUrl(url: string): boolean {
-  if (!/^https?:\/\/[^\s"'<>]+xhscdn\.com\//i.test(url)) return false
-  if (/avatar|profile|comment|emoji|sticker|icon|logo/i.test(url)) return false
-  return /\/(spectrum|note_pre_post_uhdr|notes_pre_post|notes_uhdr)\//i.test(url)
-    || /sns-img-[^/]+\.xhscdn\.com\/[^\s"'<>/]{16,}/i.test(url)
-}
-
-function buildXhsImageUrlFromId(value: any): string {
-  if (typeof value !== 'string') return ''
-  const id = value.trim().replace(/^["']|["']$/g, '')
-  if (!/^[a-zA-Z0-9_-]{16,}$/.test(id)) return ''
-  return `https://sns-img-hw.xhscdn.com/${id}`
-}
-
-function pushXhsImageUrl(set: Set<string>, value: any) {
-  if (typeof value !== 'string') return
-  const normalized = value.replace(/\\u002F/g, '/').replace(/&amp;/g, '&')
-  if (!isLikelyXhsNoteImageUrl(normalized)) return
-  const raw = getRawImageUrl(normalized)
-  if (raw && /^https?:\/\//i.test(raw)) set.add(raw)
-}
-
-function isXhsVideoNote(source: any): boolean {
-  if (!source || typeof source !== 'object') return false
-  const type = String(source.type || source.noteType || source.note_type || '').toLowerCase()
-  if (type === 'video') return true
-  if (source.video || source.videoInfo) return true
-  const card = source.noteCard || source.note_card
-  if (card && (card.video || card.videoInfo || String(card.type || '').toLowerCase() === 'video')) return true
-  return false
-}
-
-function collectXhsImagesDeep(source: any): string[] {
-  const found = new Set<string>()
-  const seen = new Set<any>()
-  const walk = (node: any, depth: number) => {
-    if (!node || depth > 10 || found.size >= 36) return
-    if (typeof node === 'string') {
-      pushXhsImageUrl(found, node)
-      return
-    }
-    if (typeof node !== 'object' || seen.has(node)) return
-    seen.add(node)
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, depth + 1)
-      return
-    }
-    for (const key of ['urlDefault', 'urlSizeLarge', 'urlPre', 'url', 'src', 'originalUrl', 'traceId', 'trace_id', 'fileId', 'file_id']) {
-      if (/^(traceId|trace_id|fileId|file_id)$/.test(key)) {
-        const built = buildXhsImageUrlFromId(node[key])
-        if (built) found.add(built)
-      } else {
-        pushXhsImageUrl(found, node[key])
-      }
-    }
-    const infoList = node.infoList || node.info_list
-    if (Array.isArray(infoList)) {
-      for (const item of infoList) walk(item, depth + 1)
-    }
-    for (const key of Object.keys(node)) {
-      if (/avatar|user|icon|emoji|sticker|comment/i.test(key)) continue
-      walk(node[key], depth + 1)
-    }
-  }
-  walk(source, 0)
-  return Array.from(found)
-}
-
-function extractXhsImagesFromHtml(html: string): string[] {
-  const found = new Set<string>()
-  const normalizedHtml = html.replace(/\\u002F/g, '/').replace(/\\\//g, '/')
-  const re = /https?:\/\/[^\s"'<>]+?xhscdn\.com[^\s"'<>]*/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(normalizedHtml)) && found.size < 36) {
-    pushXhsImageUrl(found, m[0])
-  }
-  return Array.from(found)
-}
-
-function extractXhsTitleFromHtml(html: string): string {
-  const og = html.match(/<meta\s+(?:property|name)=["']og:title["']\s+content=["']([^"']+)/i)
-    || html.match(/<title>([^<]+)/i)
-  return (og?.[1] || '').replace(/&amp;/g, '&').trim().slice(0, 100)
-}
-
-async function parseXhsImagesFast(url: string, headers: Record<string, string>): Promise<MediaResult | null> {
-  try {
-    const resp = await fetch(url, { headers, timeout: 12 } as any)
-    const html = await resp.text().catch(() => '')
-    if (html.length < 300) return null
-    const finalUrl = (resp as any).url || url
-    const embeddedUrl = extractXhsUrlFromText(html)
-    if (embeddedUrl && embeddedUrl !== url && embeddedUrl !== finalUrl) {
-      const nested = await parseXhsImagesFast(embeddedUrl, headers)
-      if (nested?.success && nested.images?.length) return nested
-    }
-    const init = extractInitialState(html)
-    const noteId = extractNoteId(finalUrl) || extractNoteId(url) || extractNoteId(extractXhsUrlFromText(html))
-    const note = init && noteId ? findNoteData(init, noteId) : null
-    if (isXhsVideoNote(note)) return null
-    if (!note && /["'](?:type|noteType|note_type)["']\s*:\s*["']video["']/i.test(html)) return null
-    const noteImages = note ? collectXhsImagesDeep(note) : []
-    const stateImages = init ? collectXhsImagesDeep(init) : []
-    const htmlImages = extractXhsImagesFromHtml(html)
-    const images = uniqueUrls([...noteImages, ...stateImages, ...htmlImages])
-      .filter((imageUrl) => !/avatar|profile|comment|emoji|sticker|icon|logo/i.test(imageUrl))
-      .slice(0, 18)
-    if (!images.length) return null
-    const debug = [
-      `小红书图文快速解析：noteId=${noteId || 'unknown'}`,
-      `候选图片：note=${noteImages.length} state=${stateImages.length} html=${htmlImages.length}`,
-      `最终保留：${images.length} 张`,
-      `页面：${finalUrl}`,
-    ]
-    return {
-      success: true,
-      platform: 'xiaohongshu',
-      title: note ? (note.title || note.desc || extractXhsTitleFromHtml(html) || '').slice(0, 100) : extractXhsTitleFromHtml(html),
-      images,
-      imagePreviews: images.map(getXhsPreviewImageUrl),
-      cover_url: getXhsPreviewImageUrl(images[0]) || images[0] || null,
-      link: finalUrl,
-      debug,
-    }
-  } catch {
-    return null
-  }
-}
-
-function collectImages(noteData: Record<string, any>): string[] {
-  const rawList: any[] = noteData.imageList || noteData.images || []
-  const uniq = new Set<string>()
-  for (const img of rawList) {
-    if (!img || typeof img !== 'object') continue
-    const u = img.urlDefault || img.url || img.urlPre || ''
-    if (u && u.includes('xhscdn')) try { uniq.add(new URL(u).toString()) } catch { uniq.add(u) }
-  }
-  return Array.from(uniq)
-}
-
-function collectVideoUrl(noteData: Record<string, any>): string {
-  const v = noteData.video || {}
-  const media = v.media || {}
-  const stm = media.stream || {}
-  const candidates: string[] = [
-    stm.masterUrl, stm.url,
-    stm.av1?.[0]?.masterUrl, stm.av1?.[0]?.url,
-    stm.h265?.[0]?.masterUrl, stm.h265?.[0]?.url,
-    stm.h264?.[0]?.masterUrl, stm.h264?.[0]?.url,
-    media.url, v.url,
-  ]
-  for (const c of candidates) {
-    if (c && typeof c === 'string' && c.startsWith('http')) {
-      const clean = c.split('?')[0].split('@')[0]
-      if (!clean.includes('.m3u8')) return clean
-    }
-  }
-  return ''
-}
-
+// ─── 小红书 ────────────────────────────────────────────
+// 逻辑都在 ./xiaohongshu 模块：
+//  · 带登录 Cookie 抓笔记页 SSR（`__INITIAL_STATE__.note.noteDetailMap`）
+//  · 视频用 ffprobe 实测编码后挑 iOS 能解的档（stream 家族名现在是 EF4/EF5/…，字段分不出编码）
+//  · 图文用 trace id 重建原图（sns-img-hw.xhscdn.com）
+// ⚠️ 登录态的签名 API（edith …/v1/feed）会被单独风控（code 300011），所以不走它。
 async function parseXiaohongshu(url: string): Promise<MediaResult> {
-  const result: MediaResult = { success: false, images: [], error: '' }
-  // 使用桌面 Chrome UA — 小红书对移动浏览器限制严格（触发"仅支持 APP 内查看"），桌面浏览器直接可访问
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
-  result.platform = 'xiaohongshu'
-  result.link = url
+  const cookie = await loadPlatformCookieForVideo("xiaohongshu").catch(() => "")
+  const parsed = await parseXhsNote(url, cookie)
 
-  // 加载配置的 Cookie（用于反爬虫，获取最高画质）
-  const cookieConfig = await loadCookies()
-  const xhsCookie = (cookieConfig.xiaohongshu || '').trim()
-  let xhslinkDiag = '' // xhslink 诊断收集
-
-  // xhslink.com 短链：ParseHub 方案 — 桌面 UA + 自动跟随重定向 + INITIAL_STATE 解析
-  const fetchHeaders: Record<string, string> = {
-    'User-Agent': UA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Referer': 'https://www.xiaohongshu.com/',
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "xiaohongshu",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    images: parsed.images,
+    imagePreviews: parsed.imagePreviews,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
   }
-  if (xhsCookie) fetchHeaders['Cookie'] = xhsCookie
-
-  // 图文帖走纯 fetch 快速解析，避免进入 WebView 后卡在 35%。如果是视频或没拿到图片，再交给原视频解析链路。
-  const fastImageResult = await parseXhsImagesFast(url, fetchHeaders)
-  if (fastImageResult?.success && fastImageResult.images?.length) return fastImageResult
-
-  if (url.match(/xhslink\.com/i)) {
-    // 策略 A: GET 桌面页面，自动跟随重定向，解析 INITIAL_STATE（纯 fetch 快速路径）
-    try {
-      const resp = await fetch(url, { headers: fetchHeaders, timeout: 20 } as any)
-      const html = await resp.text().catch(() => '')
-      if (html.length > 500) {
-        const init = extractInitialState(html)
-        const embeddedUrl = extractXhsUrlFromText(html)
-        const noteId = extractNoteId(resp.url || url) || (embeddedUrl ? extractNoteId(embeddedUrl) : null)
-        if (init && noteId) {
-          const note = findNoteData(init, noteId)
-          if (note) {
-            const images = collectImages(note).map(getRawImageUrl).filter(Boolean)
-            const videoUrl = collectVideoUrl(note)
-            result.title = (note.title || note.desc || '').slice(0, 100)
-            result.platform = 'xiaohongshu'
-            result.link = resp.url || url
-            if (videoUrl) { result.video_url = videoUrl; result.success = true; return result }
-            if (images.length) { result.images = images; result.success = true; return result }
-          }
-        }
-      }
-    } catch {}
-    // 策略 B: 手动跟随重定向（某些 xhslink 链需要多跳）
-    try {
-      let cur = url
-      for (let hop = 0; hop < 5; hop++) {
-        const resp = await fetch(cur, { headers: fetchHeaders, redirect: 'manual', timeout: 15 } as any)
-        const loc = (resp.headers as any)?.get?.('location') || (resp.headers as any)?.Location
-        if (resp.status >= 300 && resp.status < 400 && loc) {
-          cur = absolutizeUrl(cur, loc)
-          if (cur.includes('xiaohongshu.com/') && !cur.includes('/404/sec_')) {
-            // 到达真实 URL → 重新调用自身走完整解析
-            return parseXiaohongshu(cur)
-          }
-          continue
-        }
-        const html = await resp.text().catch(() => '')
-        if (html.length > 500) {
-          const init = extractInitialState(html)
-          const embeddedUrl = extractXhsUrlFromText(html)
-          const noteId = extractNoteId(cur) || (embeddedUrl ? extractNoteId(embeddedUrl) : null)
-          if (init && noteId) {
-            const note = findNoteData(init, noteId)
-            if (note) {
-              const images = collectImages(note).map(getRawImageUrl).filter(Boolean)
-              const videoUrl = collectVideoUrl(note)
-              result.title = (note.title || note.desc || '').slice(0, 100)
-              result.platform = 'xiaohongshu'
-              result.link = cur
-              if (videoUrl) { result.video_url = videoUrl; result.success = true; return result }
-              if (images.length) { result.images = images; result.success = true; return result }
-            }
-          }
-          break
-        }
-      }
-    } catch {}
-  }
-  const webView = new WebViewController({ ephemeral: true })
-  try {
-    webView.setCustomUserAgent(UA)
-    // 注入平台 Cookie（绕过反爬虫，获取最高画质）
-    await setPlatformCookies(webView, 'xiaohongshu')
-    await webView.loadURL(url)
-    await Promise.race([
-      webView.waitForLoad().then(() => true),
-      sleep(6000).then(() => false),
-    ])
-    await sleep(800)
-
-    // 获取重定向后的真实 URL（xhslink 可能需要更长时间重定向）
-    // 对于 xhslink，轮询等待 JS 跳转完成（最多 8 秒）
-    const isXhsLinkSource = url.match(/xhslink\.com/i)
-    const redirectTimeout = isXhsLinkSource ? 8000 : 2500
-    const pollInterval = 500
-    const maxPolls = redirectTimeout / pollInterval
-    let actualUrl = url
-    for (let poll = 0; poll < maxPolls; poll++) {
-      await sleep(pollInterval)
-      const loc = await webView.evaluateJavaScript<string>('location.href')
-      if (loc && loc !== url && !loc.match(/xhslink\.com/i)) {
-        actualUrl = loc
-        break
-      }
-      actualUrl = loc || actualUrl
-    }
-    if (actualUrl && actualUrl !== url && !actualUrl.match(/xhslink\.com/i)) {
-      // 如果被重定向到安全拦截页，直接返回错误
-      if (actualUrl.includes('/404/sec_')) {
-        result.error = '小红书安全验证拦截：该内容仅支持在 APP 内查看'
-        return result
-      }
-      // 如果跳转到了真正的页面，重新开始解析（因为页面内容不同）
-      webView.dispose()
-      return parseXiaohongshu(actualUrl)
-    }
-    // 如果当前在 xhslink 壳页面但有 og:url 等 meta 也可用
-    if (isXhsLinkSource && (actualUrl.match(/xhslink\.com/i) || actualUrl === url)) {
-      xhslinkDiag += `&webview_final=${encodeURIComponent(actualUrl.slice(0, 80))}`
-      const metaUrl = await webView.evaluateJavaScript<string>(`
-        (function() {
-          try {
-            var m = document.querySelector('meta[property="og:url"]') || document.querySelector('meta[name="og:url"]')
-            if (m && m.content && !m.content.includes('xhslink.com') && m.content.includes('xiaohongshu')) return m.content
-            var c = document.querySelector('link[rel="canonical"]')
-            if (c && c.href && !c.href.includes('xhslink.com') && c.href.includes('xiaohongshu')) return c.href
-          } catch(e) {}
-          return ''
-        })()
-      `)
-      xhslinkDiag += `&meta_url=${metaUrl ? 'found' : 'none'}`
-      if (metaUrl) {
-        webView.dispose()
-        return parseXiaohongshu(metaUrl)
-      }
-    } else {
-      xhslinkDiag += `&webview_final=${encodeURIComponent((actualUrl || '').slice(0, 80))}`
-    }
-
-    // 尝试滚动页面加载懒加载内容
-    await webView.evaluateJavaScript(`
-      window.scrollTo(0, 200)
-    `)
-    await sleep(1500)
-
-    // 触发视频播放
-    await webView.evaluateJavaScript(`
-      (() => {
-        var v = document.querySelector('video')
-        if (v) { try { v.muted = true; v.play() } catch(e) {} }
-        try {
-          document.querySelectorAll('iframe').forEach(function(f) {
-            var doc = f.contentDocument || f.contentWindow?.document
-            if (doc) {
-              var fv = doc.querySelector('video')
-              if (fv) { fv.muted = true; fv.play().catch(function(){}) }
-            }
-          })
-        } catch(e) {}
-      })()
-    `)
-
-    // 轮询等待异步加载的笔记数据 / video 元素出现（小红书 SSR 只给空壳，实际数据异步加载）
-    let hasNoteData = false
-    for (let poll = 0; poll < 8; poll++) {
-      await sleep(350)
-      const ready = await webView.evaluateJavaScript<boolean>(`
-        try {
-          var init = window.__INITIAL_STATE__
-          // 检查笔记数据是否已异步加载完成
-          if (init && init.noteData && init.noteData.data) {
-            var d = init.noteData.data
-            // 有 noteId 或 video 字段说明数据已到位
-            if (d.noteId || d.video || d.imageList || d.title) return true
-          }
-          // 检查 noteDetailMap（旧版结构，异步更新后可能出现）
-          if (init && init.note && init.note.noteDetailMap) {
-            var keys = Object.keys(init.note.noteDetailMap)
-            if (keys.length > 0) return true
-          }
-          // 最后兜底：video 元素已出现且 src 非 blob
-          var v = document.querySelector('video')
-          if (v && (v.currentSrc || v.src) && !(v.currentSrc || v.src).startsWith('blob:')) return true
-        } catch(e) {}
-        return false
-      `)
-      if (ready) { hasNoteData = true; break }
-    }
-    // 如果轮询结束数据仍未就绪，轻量滚动一次触发图文懒加载。
-    if (!hasNoteData) {
-      await webView.evaluateJavaScript('window.scrollTo(0, document.body.scrollHeight)')
-      await sleep(700)
-      await webView.evaluateJavaScript('window.scrollTo(0, 200)')
-      await sleep(700)
-      for (let poll = 0; poll < 4; poll++) {
-        await sleep(500)
-        const ready = await webView.evaluateJavaScript<boolean>(`
-          try {
-            var init = window.__INITIAL_STATE__
-            if (init && init.noteData && init.noteData.data) {
-              var d = init.noteData.data
-              if (d.noteId || d.video || d.imageList || d.title) return true
-            }
-            if (init && init.note && init.note.noteDetailMap) {
-              var keys = Object.keys(init.note.noteDetailMap)
-              if (keys.length > 0) return true
-            }
-          } catch(e) {}
-          return false
-        `)
-        if (ready) { hasNoteData = true; break }
-      }
-    }
-
-    // 轻量提取优先：避免把完整 __INITIAL_STATE__ / __NEXT_DATA__ 通过 JS bridge 克隆出来导致图文帖长时间卡住。
-    const quickExtract = await Promise.race([
-      webView.evaluateJavaScript<any>(`
-        (function() {
-          try {
-            function cleanImageUrl(u) {
-              if (!u || typeof u !== 'string') return ''
-              var s = u.split('?')[0].split('@')[0]
-              if (s.indexOf('/spectrum/') > -1 || s.indexOf('/notes_pre_post/') > -1 || s.indexOf('/note_pre_post_uhdr/') > -1 || s.indexOf('/notes_uhdr/') > -1) {
-                var m = s.match(/\/(spectrum|note_pre_post_uhdr|notes_pre_post|notes_uhdr)\/([^\/!]+)$/)
-                if (m) return 'https://sns-img-hw.xhscdn.com/' + m[1] + '/' + m[2]
-              }
-              return s
-            }
-            function pushImage(arr, u) {
-              u = cleanImageUrl(u)
-              if (!u || u.indexOf('xhscdn') === -1) return
-              if (arr.indexOf(u) === -1) arr.push(u)
-            }
-            function pushVideo(arr, u) {
-              if (!u || typeof u !== 'string') return
-              if (u.indexOf('blob:') === 0 || u.indexOf('.m3u8') > -1) return
-              if ((u.indexOf('sns-video') > -1 || u.indexOf('xhsvideo') > -1 || u.indexOf('.mp4') > -1) && arr.indexOf(u) === -1) arr.push(u)
-            }
-            var out = { title: '', author: '', images: [], videoUrls: [], cover: '', hasVideoNote: false }
-            var state = window.__INITIAL_STATE__ || {}
-            var candidates = []
-            var maps = [state.note && state.note.noteDetailMap, state.noteData && state.noteData.noteDetailMap, state.noteDetailMap]
-            maps.forEach(function(map) {
-              if (!map || typeof map !== 'object') return
-              Object.keys(map).forEach(function(k) {
-                var item = map[k]
-                if (item && item.note) candidates.push(item.note)
-                if (item) candidates.push(item)
-              })
-            })
-            if (state.noteData && state.noteData.data) candidates.push(state.noteData.data)
-            if (state.note && state.note.noteCard) candidates.push(state.note.noteCard)
-            for (var i = 0; i < candidates.length; i++) {
-              var n = candidates[i]
-              if (!n || typeof n !== 'object') continue
-              out.title = out.title || n.title || n.displayTitle || n.desc || ''
-              out.author = out.author || (n.user && (n.user.nickname || n.user.nickName)) || ''
-              var type = n.type || n.noteType || n.note_type || ''
-              if (type === 'video' || n.video || n.videoInfo) out.hasVideoNote = true
-              var v = n.video || n.videoInfo || (n.noteCard && n.noteCard.video)
-              if (n.videoUrl) pushVideo(out.videoUrls, n.videoUrl)
-              if (v) {
-                if (v.videoUrl) pushVideo(out.videoUrls, v.videoUrl)
-                if (v.mediaUrl) pushVideo(out.videoUrls, v.mediaUrl)
-                if (v.consumer && v.consumer.originVideoKey) pushVideo(out.videoUrls, 'https://sns-video-bd.xhscdn.com/' + v.consumer.originVideoKey)
-                var stream = (v.media && v.media.stream) || v.stream || {}
-                ;['h264','h265','av1'].forEach(function(codec) {
-                  var list = stream[codec] || []
-                  for (var si = 0; si < list.length; si++) {
-                    pushVideo(out.videoUrls, list[si].masterUrl)
-                    var bu = list[si].backupUrl || list[si].backup_url
-                    if (Array.isArray(bu)) bu.forEach(function(x) { pushVideo(out.videoUrls, x) })
-                    else pushVideo(out.videoUrls, bu)
-                  }
-                })
-              }
-              if (!out.hasVideoNote && !out.videoUrls.length) {
-                var imgs = n.imageList || n.image_list || n.images || []
-                for (var j = 0; j < imgs.length; j++) {
-                  var img = imgs[j]
-                  pushImage(out.images, img.urlDefault || img.urlSizeLarge || img.url || (img.infoList && img.infoList[0] && img.infoList[0].url) || '')
-                }
-              }
-              if (n.cover) out.cover = out.cover || n.cover.urlDefault || n.cover.url || ''
-            }
-            var videoEl = document.querySelector('video')
-            if (videoEl) {
-              pushVideo(out.videoUrls, videoEl.currentSrc || videoEl.src || '')
-              out.cover = out.cover || videoEl.poster || ''
-            }
-            if (!out.videoUrls.length && !out.hasVideoNote && !out.images.length) {
-              var domImgs = document.querySelectorAll('img')
-              for (var di = 0; di < domImgs.length && out.images.length < 18; di++) {
-                var src = domImgs[di].src || domImgs[di].getAttribute('data-src') || ''
-                if (src.length > 60) pushImage(out.images, src)
-              }
-            }
-            return out
-          } catch(e) { return { error: e.message || String(e), images: [], videoUrls: [] } }
-        })()
-      `),
-      sleep(5000).then(() => ({ error: 'quick_extract_timeout', images: [], videoUrls: [] })),
-    ])
-    if (quickExtract && !quickExtract.error) {
-      result.title = quickExtract.title || result.title || ''
-      result.author = quickExtract.author || result.author || ''
-      result.cover_url = quickExtract.cover || result.cover_url || ''
-      const quickVideos = uniqueUrls(quickExtract.videoUrls || []).filter((u) => isValidDownloadUrl(u) || u.startsWith('http'))
-      const quickImages = uniqueUrls(quickExtract.images || []).filter((u) => isValidDownloadUrl(u) || u.startsWith('http')).slice(0, 18)
-      if (quickVideos.length) {
-        result.video_url = removeWatermarkFromUrl(quickVideos[0])
-        result.videoUrls = quickVideos.map(removeWatermarkFromUrl)
-      }
-      if (!result.video_url && quickImages.length) {
-        result.images = quickImages.map(removeWatermarkFromUrl)
-      }
-      result.success = !!(result.video_url || result.images?.length)
-      if (result.success) return result
-      if (quickExtract.hasVideoNote) {
-        const xhsCookie = (cookieConfig.xiaohongshu || '').trim()
-        result.error = xhsCookie
-          ? '小红书视频笔记未能提取到无水印链接，可能是登录态已过期。'
-          : '小红书视频解析需要登录态。请在设置中配置小红书 Cookie（web_session + a1 字段），然后重试。'
-        return result
-      }
-    }
-
-    // 从页面提取数据
-    const extracted = await webView.evaluateJavaScript<any>(`
-      try {
-        // performance 媒体资源（等待更久以捕获视频加载）
-        var mediaEntries = performance.getEntriesByType('resource')
-          .map(function(e) { return e.name })
-          .filter(function(n) {
-            return ['xhscdn','sns-video','sns-img','.mp4','video','masterUrl','trace','sns-','.m3u8'].some(function(k) { return n.indexOf(k) > -1 })
-          })
-
-        // 额外：从已完成的网络请求中找视频直链（小红书视频 CDN 特征）
-        var networkVideos = performance.getEntriesByType('resource')
-          .filter(function(e) {
-            var n = e.name
-            // 小红书视频 CDN 直链模式
-            return (n.indexOf('sns-video-hw') > -1 || n.indexOf('sns-video-qc') > -1 || n.indexOf('xhsvideo') > -1)
-              && (n.indexOf('.mp4') > -1 || n.indexOf('video') > -1)
-          })
-          .map(function(e) { return e.name })
-
-        // video 元素 — 当前文档
-        var v = document.querySelector('video')
-        var videoSrc = v ? (v.currentSrc || v.src || '') : ''
-        var poster = v ? v.poster : ''
-
-        // 尝试 video > source 子元素
-        var sourceSrc = ''
-        if (!videoSrc || videoSrc.startsWith('blob:')) {
-          try {
-            var srcEl = document.querySelector('video source[src]')
-            if (srcEl && srcEl.src) sourceSrc = srcEl.src
-          } catch(e) {}
-        }
-
-        // iframe 中的 video 元素
-        var iframeVideoSrc = ''
-        try {
-          document.querySelectorAll('iframe').forEach(function(f) {
-            try {
-              var doc = f.contentDocument || f.contentWindow?.document
-              if (doc) {
-                var fv = doc.querySelector('video')
-                if (fv && (fv.currentSrc || fv.src) && !fv.src.startsWith('blob:')) {
-                  iframeVideoSrc = fv.currentSrc || fv.src
-                }
-              }
-            } catch(e) {}
-          })
-        } catch(e) {}
-
-        // __INITIAL_STATE__（小红书的 SSR 数据，重新读取以获取异步更新后的数据）
-        var initState = null
-        try { if (window.__INITIAL_STATE__) initState = JSON.parse(JSON.stringify(window.__INITIAL_STATE__)) } catch(e) {}
-
-        // __NEXT_DATA__
-        var nextData = null
-        try { if (window.__NEXT_DATA__) nextData = JSON.parse(JSON.stringify(window.__NEXT_DATA__)) } catch(e) {}
-
-        // ── Procut 原版：直接在 JS 上下文读取视频 URL（不依赖 JSON clone）──
-        // ── Procut 原版提取（精确照搬原始代码）──
-        var xhsExtractJson = '{}'
-        try {
-          var r = {
-            title:'', content:'', author:'', avatar:'',
-            images:[], imageWidths:[], imageHeights:[],
-            videoUrl:'', livePhotoVideoUrls:[],
-            hasNoteData:false, time:0
-          }
-          // 去水印：将 xhscdn URL 转为 sns-img-hw.xhscdn.com 原图
-          function getRawImageUrl(imgUrl) {
-            if (!imgUrl) return ''
-            var specMatch = imgUrl.match(/\/(spectrum|note_pre_post_uhdr|notes_pre_post|notes_uhdr)\/([^\/!]+?)(?:!.*)?$/)
-            if (specMatch) return 'http://sns-img-hw.xhscdn.com/' + specMatch[1] + '/' + specMatch[2]
-            var generalMatch = imgUrl.match(/\/([^\/!]+?)(?:!.*)?$/)
-            if (generalMatch) return 'http://sns-img-hw.xhscdn.com/' + generalMatch[1]
-            return imgUrl
-          }
-          var s = window.__INITIAL_STATE__
-          if (s && s.note && s.note.noteDetailMap) {
-            var ndm = s.note.noteDetailMap
-            var keys = Object.keys(ndm)
-            for (var i = 0; i < keys.length; i++) {
-              var n = ndm[keys[i]] && ndm[keys[i]].note
-              if (n && n.title) {
-                r.title = n.title || ''
-                r.content = n.desc || ''
-                r.hasNoteData = true
-                if (n.time) r.time = n.time
-                if (n.user) {
-                  r.author = n.user.nickname || ''
-                  r.avatar = n.user.avatar || ''
-                }
-                if (n.type === 'video') {
-                  r.videoUrls = []
-                  if (n.videoUrl) { r.videoUrls.push(n.videoUrl) }
-                  // originVideoKey 优先（原始上传文件，画质最高）
-                  if (n.video && n.video.consumer && n.video.consumer.originVideoKey) {
-                    var ovk = 'https://sns-video-bd.xhscdn.com/' + n.video.consumer.originVideoKey
-                    if (r.videoUrls.indexOf(ovk) === -1) r.videoUrls.push(ovk)
-                  }
-                  // 然后才收集 stream masterUrl（可能只有 720p）
-                  if (n.video && n.video.media && n.video.media.stream) {
-                    var stm = n.video.media.stream
-                    var codecs = ['h264','h265','av1']
-                    for (var ci = 0; ci < codecs.length; ci++) {
-                      var arr = stm[codecs[ci]]
-                      if (arr && arr.length > 0) {
-                        for (var si = 0; si < arr.length; si++) {
-                          var s = arr[si]
-                          if (s.masterUrl && s.masterUrl.indexOf('.m3u8') === -1) {
-                            if (r.videoUrls.indexOf(s.masterUrl) === -1) r.videoUrls.push(s.masterUrl)
-                          }
-                        }
-                      }
-                    }
-                  }
-                  if (n.video && n.video.mediaUrl) {
-                    if (r.videoUrls.indexOf(n.video.mediaUrl) === -1) r.videoUrls.push(n.video.mediaUrl)
-                  }
-                  r.videoUrl = r.videoUrls.length > 0 ? r.videoUrls[0] : ''
-                }
-                // 只有非视频帖才提取 imageList（视频帖有封面图但不应作为图片下载）
-                if (n.type !== 'video' && n.imageList && n.imageList.length > 0) {
-                  for (var j = 0; j < n.imageList.length; j++) {
-                    var img = n.imageList[j]
-                    var url = getRawImageUrl(img.urlDefault || img.url || img.urlSizeLarge || '')
-                    if (url) {
-                      r.images.push(url)
-                      r.imageWidths.push(img.width || 0)
-                      r.imageHeights.push(img.height || 0)
-                    }
-                  }
-                }
-                break
-              }
-            }
-          }
-          // __INITIAL_STATE__ 无笔记数据时，从 DOM <img> 元素提取图片URL
-          if (!r.hasNoteData) {
-            try {
-              var imgs = document.querySelectorAll('img')
-              for (var ii = 0; ii < imgs.length; ii++) {
-                var isrc = imgs[ii].src || imgs[ii].getAttribute('data-src') || ''
-                if (isrc.indexOf('xhscdn') > -1 && isrc.indexOf('sns-') > -1 && isrc.length > 60) {
-                  // 取原始图（去掉 @ 后缀）
-                  var cleanSrc = isrc.split('?')[0].split('@')[0]
-                  if (r.images.indexOf(cleanSrc) === -1) r.images.push(cleanSrc)
-                }
-              }
-              if (r.images.length > 0) r.hasNoteData = true
-            } catch(e2) {}
-          }
-          xhsExtractJson = JSON.stringify(r)
-        } catch(e) { xhsExtractJson = JSON.stringify({ error: e.message }) }
-
-
-        // JSON-LD
-        var jsonld = null
-        try {
-          var ld = document.querySelector('script[type="application/ld+json"]')
-          if (ld) jsonld = ld.textContent || ''
-        } catch(e) {}
-
-        // meta
-        var ogTitle = '', ogImage = '', ogVideo = ''
-        try { ogTitle = document.querySelector('meta[property="og:title"]').content } catch(e) {}
-        try { ogImage = document.querySelector('meta[property="og:image"]').content } catch(e) {}
-        try { ogVideo = document.querySelector('meta[property="og:video"]').content } catch(e) {}
-
-        // twitter:player
-        var twitterPlayer = ''
-        try { twitterPlayer = document.querySelector('meta[name="twitter:player"]').content } catch(e) {}
-
-        // ── 壳页面检测 ──
-        // 1. notFoundPage：SSR 标记此内容为 APP 内查看
-        var isNotfoundPage = !!(initState && initState.notFoundPage)
-        // 2. 页面 body 包含 "APP内查看" 或 "仅支持在小红书 APP"
-        var bodyText = (document.body && document.body.innerText || '').slice(0, 300)
-        var isAppOnlyPage = bodyText.indexOf('APP内查看') > -1 || bodyText.indexOf('仅支持在小红书 APP') > -1
-        // 3. 被安全系统重定向到 /404/sec_ 页面
-        var currentUrl = window.location.href || ''
-        var isSecRedirect = currentUrl.indexOf('/404/sec_') > -1
-        // 4. noteData.data 完全为空（没有异步数据注入）
-        var noteDataEmpty = initState && initState.noteData && initState.noteData.data
-          && Object.keys(initState.noteData.data).length === 0
-        // 5. 没有有效的 video 元素
-        var hasValidVideo = !!(v && (v.currentSrc || v.src) && !(v.currentSrc || v.src).startsWith('blob:'))
-
-        return {
-          mediaEntries: mediaEntries.slice(0, 30),
-          networkVideos: networkVideos.slice(0, 10),
-          initState: initState,
-          nextData: nextData,
-          xhsExtractJson: xhsExtractJson,
-          jsonld: jsonld,
-          videoSrc: videoSrc,
-          sourceSrc: sourceSrc,
-          iframeVideoSrc: iframeVideoSrc,
-          poster: poster,
-          ogTitle: ogTitle,
-          ogImage: ogImage,
-          ogVideo: ogVideo,
-          twitterPlayer: twitterPlayer,
-          documentTitle: document.title || '',
-          bodyText: bodyText,
-          // 壳页面检测标志
-          isNotfoundPage: isNotfoundPage,
-          isAppOnlyPage: isAppOnlyPage,
-          isSecRedirect: isSecRedirect,
-          noteDataEmpty: noteDataEmpty,
-          hasValidVideo: hasValidVideo,
-          currentUrl: currentUrl,
-        }
-      } catch(e) { return { error: e.message } }
-    `)
-
-    if (!extracted || extracted.error) {
-      result.error = extracted?.error || 'WebView 提取失败'
-      return result
-    }
-
-    // ─── 壳页面检测（防止误判为图片）───
-    // XHS 对部分视频/内容实施严格反爬，SSR 只返回空壳，WebView 也无法加载真实数据
-    if (extracted.isSecRedirect) {
-      result.error = '小红书安全验证拦截：该内容需在 APP 内查看（被重定向至安全页面 ' + (extracted.currentUrl || '') + '）'
-      return result
-    }
-    if (extracted.isNotfoundPage && extracted.noteDataEmpty) {
-      const noteType = (extracted.initState?.notFoundPage?.noteType) || '未知'
-      result.error = '小红书安全策略限制：该' + (noteType === 'video' ? '视频' : noteType === 'image' ? '图文' : '内容') + '仅支持在 APP 内查看，Web 端无法获取数据'
-      return result
-    }
-    if (extracted.isAppOnlyPage && !extracted.hasValidVideo && !extracted.networkVideos?.length) {
-      result.error = '小红书限制：该内容仅支持在 APP 内查看，无法通过网页提取视频'
-      return result
-    }
-    // ─── 提取视频 ───
-    // -1. Procut 原版提取结果（JSON 字符串，JS 上下文直接读取）
-    try {
-      const xhsJson = (extracted as any).xhsExtractJson as string | undefined
-      if (xhsJson && xhsJson.length > 2) {
-        const px = JSON.parse(xhsJson) as {
-          title?: string; content?: string; author?: string;
-          images?: string[]; videoUrl?: string; hasNoteData?: boolean;
-        }
-        if (px.hasNoteData) {
-          if (!result.video_url && px.videoUrl && px.videoUrl.startsWith('http') && !px.videoUrl.includes('.m3u8')) {
-            result.video_url = px.videoUrl
-          }
-          if (!result.title && px.title) result.title = px.title
-          if (!result.author && px.author) result.author = px.author
-          if (px.images?.length) {
-            for (const img of px.images) {
-              const raw = img && img.startsWith('http') && img.includes('xhscdn') ? getRawImageUrl(img) : img
-              if (raw && !result.images!.includes(raw)) result.images!.push(raw)
-            }
-          }
-        }
-      }
-    } catch(e) {}
-    // 0. 网络请求中捕获的视频直链（最可靠，小红书异步加载后发出的 XHR）
-    if (!result.video_url && extracted.networkVideos?.length) {
-      for (const u of extracted.networkVideos) {
-        if (u.startsWith('http') && !u.includes('.m3u8')) {
-          result.video_url = u
-          break
-        }
-      }
-    }
-    // 0b. video > source 子元素
-    if (!result.video_url && extracted.sourceSrc && !extracted.sourceSrc.startsWith('blob:')) {
-      result.video_url = extracted.sourceSrc
-    }
-    // 1. iframe 中的 video src（可能指向 CDN 直链）
-    if (!result.video_url && extracted.iframeVideoSrc && !extracted.iframeVideoSrc.startsWith('blob:')) {
-      result.video_url = extracted.iframeVideoSrc
-    }
-    // 2. 从 performance 媒体资源提取（总是 HTTP URL，非 blob）
-    if (extracted.mediaEntries?.length) {
-      for (const u of extracted.mediaEntries) {
-        if (u.match(/\.mp4(\?|$)/) || u.match(/masterUrl|sns-video|trace/) && !u.includes('.m3u8')) {
-          result.video_url = u
-          break
-        }
-      }
-    }
-    // 2. og:video（跳过 blob）
-    if (!result.video_url && extracted.ogVideo && !extracted.ogVideo.startsWith('blob:')) {
-      result.video_url = extracted.ogVideo
-    }
-    // 3. twitter:player（类似 og:video）
-    if (!result.video_url && extracted.twitterPlayer && !extracted.twitterPlayer.startsWith('blob:')) {
-      result.video_url = extracted.twitterPlayer
-    }
-    // 4. video src（跳过 blob URL）
-    if (!result.video_url && extracted.videoSrc && !extracted.videoSrc.startsWith('blob:')) {
-      result.video_url = extracted.videoSrc
-    }
-
-    // ─── 提取图片（从 performance 资源）───
-    // 仅当 __INITIAL_STATE__ 未加载时（如壳页面兜底）才使用 performance 图片
-    // 如果 JS 已成功提取 note 数据，performance 资源可能包含推荐笔记/UI 干扰项
-    const jsNoteExtracted = !!(extracted as any).xhsExtractJson && ((extracted as any).xhsExtractJson.includes('"hasNoteData":true'))
-    if (!result.video_url && !jsNoteExtracted && !extracted.isNotfoundPage && !extracted.isAppOnlyPage && !extracted.isSecRedirect) {
-      for (const u of (extracted.mediaEntries || [])) {
-        if (u.match(/sns-img|\.(jpg|jpeg|png|webp)/i)) {
-          result.images!.push(u.replace(/\?.*$/, '').split('@')[0])
-        }
-      }
-    }
-
-    // ─── 从 __INITIAL_STATE__ 提取视频和元数据 ───
-    const init = extracted.initState
-    // 也尝试 __NEXT_DATA__ 的 props
-    const nextData = extracted.nextData
-    
-    // 合并搜索路径（适应小红书的多种数据结构版本）
-    const possibleNotes: any[] = []
-    
-    // __INITIAL_STATE__ 的各种可能路径
-    if (init) {
-      // 辅助：从 noteDetailMap 取值并展开 .note 里层
-      const noteDetailMapValues: any[] = []
-      const ndmSources = [
-        init?.note?.noteDetailMap,
-        init?.noteData?.noteDetailMap,
-        init?.noteDetailMap,
-      ]
-      for (const ndm of ndmSources) {
-        if (ndm && typeof ndm === 'object') {
-          for (const v of Object.values(ndm)) {
-            if (v && typeof v === 'object') {
-              // Procut 原版: ndm[key].note — 显式取里层
-              if ((v as any).note && typeof (v as any).note === 'object') {
-                noteDetailMapValues.push((v as any).note)
-              }
-              noteDetailMapValues.push(v)
-            }
-          }
-        }
-      }
-
-      const searchPaths = [
-        init?.noteData?.data,
-        init?.note,
-        init?.note?.noteList?.[0],
-        init?.note?.noteCard,
-        init?.noteCard,
-        init?.note?.[Object.keys(init.note || {})[0]],
-        init?.feed?.[0],
-        init?.feeds?.[0],
-        ...noteDetailMapValues,
-      ]
-      for (const p of searchPaths) {
-        if (p && typeof p === 'object') possibleNotes.push(p)
-      }
-    }
-
-    // __NEXT_DATA__ 的路径（SSR 版本）
-    if (nextData) {
-      const nextState = nextData?.props?.pageProps?.initialState
-      const nextDetailMap = nextState?.noteDetailMap || nextData?.props?.pageProps?.noteDetailMap
-      const nextNotes: any[] = []
-      if (nextDetailMap && typeof nextDetailMap === 'object') {
-        for (const v of Object.values(nextDetailMap)) {
-          if (v && typeof v === 'object') {
-            if ((v as any).note && typeof (v as any).note === 'object') nextNotes.push((v as any).note)
-            nextNotes.push(v)
-          }
-        }
-      }
-      const nextPaths = [
-        nextData?.props?.pageProps?.noteData,
-        nextData?.props?.pageProps?.noteDetail,
-        nextState?.note,
-        ...nextNotes,
-      ]
-      for (const p of nextPaths) {
-        if (p && typeof p === 'object') possibleNotes.push(p)
-      }
-    }
-    
-    // 从 JSON-LD 提取
-    if (extracted.jsonld) {
-      try {
-        const ld = JSON.parse(extracted.jsonld as string)
-        if (ld?.video) {
-          const vUrl = ld.video.contentUrl || ld.video.url || ''
-          if (vUrl && !vUrl.startsWith('blob:')) result.video_url = result.video_url || vUrl
-        }
-      } catch {}
-    }
-
-    // 追踪笔记类型：如果任意 note 是 video 类型但没提取到视频 URL，后面不降级到图片
-    let hasVideoNote = false
-
-    for (const note of possibleNotes) {
-      if (!note || typeof note !== 'object') continue
-      const rawNote = note as any
-      // 展开 .note 里层（Procut 原版: ndm[key].note）
-      const n = (rawNote.note && typeof rawNote.note === 'object') ? rawNote.note : rawNote
-      result.title = result.title || n.title || n.displayTitle || ''
-      result.author = result.author || n.user?.nickname || n.user?.nickName || n.nickname || ''
-
-      // 检测 note 类型（video / normal / carousel）
-      const noteType = n.type || n.noteType || n.note_type || rawNote.type || rawNote.noteType || ''
-      if (noteType === 'video') hasVideoNote = true
-      // 有 video 数据也标记为视频笔记
-      if (n.video || n.videoInfo || n.noteCard?.video) hasVideoNote = true
-
-      // 优先级 0: note 对象的直接 videoUrl 字段（Procut 逆向确认 note 层级也有）
-      if (!result.video_url && n.videoUrl && typeof n.videoUrl === 'string') {
-        const directVideo = n.videoUrl
-        if (directVideo.startsWith('http') && !directVideo.includes('.m3u8')) {
-          result.video_url = directVideo
-        }
-      }
-
-      // 视频数据：尝试 noteCard 包裹层（新版小红书结构）
-      const v = n.video || n.media?.video || n.videoInfo || n.noteCard?.video || n.noteCard?.media?.video
-      if (v) {
-        // 优先级 1: video 对象的 videoUrl 字段
-        if (!result.video_url && (v as any).videoUrl && typeof (v as any).videoUrl === 'string') {
-          const directVideo = (v as any).videoUrl
-          if (directVideo.startsWith('http') && !directVideo.includes('.m3u8')) {
-            result.video_url = directVideo
-          }
-        }
-
-        // 优先级 2: 收集所有视频 URL 候选（originVideoKey 优先）
-        const allUrls: string[] = []
-        // originVideoKey 优先（原始上传文件，无二压）
-        if (v.consumer?.originVideoKey && typeof v.consumer.originVideoKey === 'string') {
-          const ovk = 'https://sns-video-bd.xhscdn.com/' + v.consumer.originVideoKey
-          if (!allUrls.includes(ovk)) allUrls.push(ovk)
-        }
-        // 然后 media.stream 各 codec 的 masterUrl
-        const streams = v.media?.stream || v.stream || v.videoInfo || v.media?.av1 || {}
-        if (streams && typeof streams === 'object') {
-          const codecs = ['h264', 'h265', 'av1']
-          for (const codec of codecs) {
-            const arr = (streams as any)[codec]
-            if (!Array.isArray(arr)) continue
-            for (const s of arr) {
-              if (!s) continue
-              if (s.masterUrl && !s.masterUrl.includes('.m3u8') && typeof s.masterUrl === 'string') {
-                if (!allUrls.includes(s.masterUrl)) allUrls.push(s.masterUrl)
-              }
-              const bu = s.backupUrl || s.backup_url
-              if (bu) {
-                if (typeof bu === 'string' && !bu.includes('.m3u8') && !allUrls.includes(bu)) {
-                  allUrls.push(bu)
-                } else if (Array.isArray(bu)) {
-                  for (const u of bu) {
-                    if (typeof u === 'string' && !u.includes('.m3u8') && !allUrls.includes(u)) {
-                      allUrls.push(u)
-                    }
-                  }
-                }
-              }
-            }
-          }
-          const master = (streams as any).masterUrl || (streams as any).master_url
-          if (typeof master === 'string' && !master.includes('.m3u8') && !allUrls.includes(master)) {
-            allUrls.push(master)
-          }
-        }
-        // mediaUrl 兜底
-        if ((v as any).mediaUrl && typeof (v as any).mediaUrl === 'string') {
-          const mu = (v as any).mediaUrl
-          if (mu.startsWith('http') && !mu.includes('.m3u8') && !allUrls.includes(mu)) {
-            allUrls.push(mu)
-          }
-        }
-        // 去重后赋值
-        const deduped = [...new Set(allUrls)]
-        if (deduped.length > 0) {
-          result.video_url = deduped[0]
-          result.videoUrls = deduped
-        }
-
-        // 优先级 5: 直接 url / src 兜底
-        if (!result.video_url) {
-          const directUrl = (v as any).url || (v as any).src || ''
-          if (typeof directUrl === 'string' && directUrl.startsWith('http') && !directUrl.includes('.m3u8')) {
-            result.video_url = directUrl
-          }
-        }
-      }
-
-      // 图片列表（仅当未找到视频时才提取，防止视频帖封面图被误判为图片帖）
-      // 视频笔记（note.type === 'video' 或含 video 数据）不降级提取图片，避免封面图被当成内容
-      if (!result.video_url && !hasVideoNote) {
-        const imgs = n.imageList || n.image_list || n.images || []
-        for (const img of imgs) {
-          // urlSizeLarge 是高清原图（Procut 逆向确认优先级）
-          const rawUrl = (img as any).urlDefault || (img as any).urlSizeLarge || (img as any).url || (img as any).infoList?.[0]?.url || ''
-          if (rawUrl) {
-            const deduced = getRawImageUrl(rawUrl)
-            result.images!.push(deduced.replace(/\?.*$/, '').split('@')[0])
-          }
-        }
-      }
-      if (n.cover?.urlDefault || n.cover?.url) {
-        result.cover_url = result.cover_url || n.cover?.urlDefault || n.cover?.url || ''
-      }
-    }
-
-    // ─── 视频笔记兜底提示 ───
-    // 如果 note 类型是 video 但未能提取到 video_url，大概率是登录态不足，引导用户配置 Cookie
-    if (hasVideoNote && !result.video_url) {
-      const xhsCookie = (cookieConfig.xiaohongshu || '').trim()
-      result.error = '该笔记为视频类型但未能提取到无水印视频链接。' +
-        (xhsCookie
-          ? '可能是登录态已过期，请重新配置小红书 Cookie。'
-          : '小红书视频解析需要登录态。请在设置中配置小红书 Cookie（web_session + a1 字段），然后重试。')
-      result.success = false
-      return result
-    }
-
-    // ─── 封面与标题兜底 ───
-    result.cover_url = result.cover_url || extracted.poster || extracted.ogImage || ''
-    if (!result.title) {
-      result.title = extracted.ogTitle || extracted.documentTitle ||
-        (extracted.bodyText ? extracted.bodyText.slice(0, 50) : '')
-    }
-
-    // ─── 去重图片 ───
-    const seen = new Set<string>()
-    result.images = (result.images || []).filter(u => {
-      const clean = u.replace(/\?.*$/, '').split('@')[0]
-      if (seen.has(clean)) return false
-      seen.add(clean)
-      return true
-    }).slice(0, 18)
-
-    // ─── 水印清理 ───
-    // 小红书 CDN URL 可能带 /watermark/ 路径或 @ 后缀，清理后才是无水印版本
-    if (result.video_url) {
-      result.video_url = removeWatermarkFromUrl(result.video_url)
-      if (!isValidDownloadUrl(result.video_url)) result.video_url = ''
-    }
-    if (result.images!.length) {
-      result.images = result.images!.map(u => removeWatermarkFromUrl(u)).filter(u => isValidDownloadUrl(u) || u.startsWith('http'))
-    }
-
-    result.success = !!(result.video_url || result.images!.length)
-    if (!result.success) {
-      // 诊断输出：帮助分析失败原因
-      const diag: string[] = []
-      diag.push(`hasNoteData=${hasNoteData}`)
-      diag.push(`hasVideoNote=${hasVideoNote}`)
-      diag.push(`xhsJson_len=${((extracted as any).xhsExtractJson || '').length}`)
-
-      diag.push(`isAppOnly=${!!(extracted as any).isAppOnlyPage}`)
-      diag.push(`isNotFound=${!!(extracted as any).isNotfoundPage}`)
-      diag.push(`isSecRedir=${!!(extracted as any).isSecRedirect}`)
-      const bodyLen = ((extracted as any).bodyText || '').length
-      diag.push(`bodyLen=${bodyLen}`)
-      try {
-        const __s = (extracted as any).initState
-        if (__s) {
-          const topKeys = Object.keys(__s).slice(0, 10).join(',')
-          diag.push(`initState_keys=[${topKeys}]`)
-          if (__s.note) {
-            const noteKeys = Object.keys(__s.note).slice(0, 10).join(',')
-            diag.push(`note_keys=[${noteKeys}]`)
-            if (__s.note.noteDetailMap) {
-              const ndmKeys = Object.keys(__s.note.noteDetailMap)
-              diag.push(`ndm_count=${ndmKeys.length}`)
-              if (ndmKeys.length > 0) {
-                const first = __s.note.noteDetailMap[ndmKeys[0]]
-                const firstKeys = Object.keys(first).join(',')
-                diag.push(`ndm_first_keys=[${firstKeys}]`)
-                const nfm = (first as any).note
-                if (nfm && typeof nfm === 'object') {
-                  diag.push(`ndm.note_type=${nfm.type}, imgCount=${(nfm.imageList || []).length}, hasVideo=${!!nfm.video}`)
-                }
-              }
-            }
-          }
-          if (__s.noteData) {
-            diag.push(`noteData_keys=[${Object.keys(__s.noteData).join(',')}]`)
-          }
-        } else {
-          diag.push('initState=null')
-        }
-      } catch(e: any) { diag.push(`diag_err=${e.message}`) }
-      if (xhslinkDiag) diag.push(`xhslink=${xhslinkDiag}`)
-      result.error = '无法从小红书页面提取内容：未找到视频或图片 | ' + diag.join(' | ')
-    }
-  } catch (e: any) {
-    result.error = e.message || String(e)
-  } finally {
-    webView.dispose()
-  }
-
+  if (parsed.videoQuality) result.debug!.push(`视频档位：${parsed.videoQuality}`)
+  if (parsed.livePhotoCount) result.debug!.push(`这条笔记含 ${parsed.livePhotoCount} 张动图（本脚本按原图下载）`)
   return result
 }
 
 // ─── Instagram ─────────────────────────────────────────
+// ─── Instagram ─────────────────────────────────────────
+// Instagram 现在基本必须登录才能取到媒体；旧实现（写死 doc_id 的 GraphQL + WebView 乱抓 <video>）
+// 会把登录墙 / 推荐流里的**别的视频**当成结果 —— 这就是「下到的不是这个链接的视频」的根因。
+// 现在：模块负责「带登录态 + 校验短码」，WebView 仅作兜底且同样强制校验页面身份。
 async function parseInstagram(url: string): Promise<MediaResult> {
-  const result: MediaResult = { success: false, error: '' }
-  const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-  result.platform = 'instagram'
-  result.link = url
+  const normalized = url.replace(/\uff1f/g, "?")
+  const cookie = await loadPlatformCookieForVideo("instagram").catch(() => "")
+  const parsed = await parseInstagramPost(normalized, cookie)
 
-  // 归一化全角问号（Instagram 分享链接有时用 ？代替 ?）
-  const normalizedUrl = url.replace(/\uff1f/g, '?')
-  const shortcode = normalizedUrl.match(/(?:p|reel|reels|tv)\/([^/?]+)/)?.[1]
-  if (!shortcode) { result.error = '无法提取 Instagram ID'; return result }
-
-  // ── Strategy 1: GraphQL API (无需 WebView) ──────────────
-  async function graphQLStrategy(): Promise<MediaResult | null> {
-    try {
-      // 1) 先访问主页获取 csrftoken
-      const homeResp = await fetch('https://www.instagram.com/', {
-        headers: { 'User-Agent': UA, 'Accept': '*/*' },
-        timeout: 15,
-      })
-      let csrfToken = ''
-      // 从 set-cookie 提取 csrftoken
-      const setCookie = homeResp.headers?.get?.('set-cookie') || ''
-      const csrfMatch = setCookie.match(/csrftoken=([^;]+)/)
-      if (csrfMatch) csrfToken = csrfMatch[1]
-
-      // 2) GraphQL POST
-      const variables = JSON.stringify({
-        shortcode,
-        __relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider: false,
-      })
-      const body = `variables=${encodeURIComponent(variables)}&doc_id=27128499623469141&server_timestamps=true`
-
-      const gqlResp = await fetch('https://www.instagram.com/graphql/query', {
-        method: 'POST',
-        headers: {
-          'User-Agent': UA,
-          'Accept': '*/*',
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Referer': 'https://www.instagram.com/',
-          'x-csrftoken': csrfToken,
-          'Cookie': 'csrftoken=' + csrfToken,
-        } as Record<string, string>,
-        body,
-        timeout: 20,
-      })
-      if (!gqlResp.ok) return null
-      const text = await gqlResp.text()
-      let data: any
-      try { data = JSON.parse(text) } catch { return null }
-
-      const payload = data?.data || data
-      if (!payload) return null
-
-      // ── 统一媒体节点提取 ──
-      // 将 v1 格式 (xdt_api__v1__media__shortcode__web_info) 规范化为标准格式
-      function normalizeMediaNode(raw: any): any {
-        if (!raw) return null
-        if (raw.__typename || raw.display_url) return raw
-        if (raw.media_type != null || raw.video_versions) {
-          const isV1Video = raw.media_type === 2
-          const isV1Sidecar = raw.media_type === 8
-          const videoUrl = raw.video_versions?.[0]?.url || ''
-          const imageUrl = raw.image_versions2?.candidates?.[0]?.url || ''
-          const v1typename = isV1Video ? 'GraphVideo' : (isV1Sidecar ? 'GraphSidecar' : 'GraphImage')
-          return {
-            __typename: v1typename,
-            video_url: videoUrl,
-            display_url: imageUrl,
-            is_video: isV1Video,
-            edge_sidecar_to_children: isV1Sidecar ? {
-              edges: (raw.carousel_media || []).map((item: any) => ({ node: normalizeMediaNode(item) }))
-            } : undefined,
-            owner: null,
-            edge_media_to_caption: { edges: [] },
-          }
-        }
-        if (raw.video_versions || raw.image_versions2) {
-          const isV1Video = raw.media_type === 2
-          const videoUrl = raw.video_versions?.[0]?.url || ''
-          const imageUrl = raw.image_versions2?.candidates?.[0]?.url || raw.display_url || ''
-          return {
-            __typename: isV1Video ? 'GraphVideo' : 'GraphImage',
-            video_url: videoUrl,
-            display_url: imageUrl,
-            is_video: isV1Video,
-          }
-        }
-        return raw
-      }
-
-      let mediaData = payload.xdt_shortcode_media
-      if (!mediaData && payload.xdt_api__v1__media__shortcode__web_info?.items?.[0]) {
-        mediaData = normalizeMediaNode(payload.xdt_api__v1__media__shortcode__web_info.items[0])
-      }
-
-      if (!mediaData) return null
-
-      const typename = mediaData.__typename || ''
-      const isVideo = typename === 'XDTGraphVideo' || typename === 'GraphVideo'
-      const isSidecar = typename === 'XDTGraphSidecar' || typename === 'GraphSidecar'
-
-      result.title = mediaData.edge_media_to_caption?.edges?.[0]?.node?.text ||
-                     mediaData.caption?.text || ''
-      result.author = mediaData.owner?.username ||
-                      mediaData.owner?.full_name ||
-                      mediaData.user?.username || ''
-
-      if (isSidecar) {
-        const edges = mediaData.edge_sidecar_to_children?.edges || []
-        const images: string[] = []
-        for (const edge of edges) {
-          const node = edge.node || edge
-          const nodeIsVideo = node.is_video ||
-            (node.__typename === 'XDTGraphVideo' || node.__typename === 'GraphVideo') ||
-            !!(node.video_versions?.length || node.video_url)
-          if (nodeIsVideo && (node.video_url || node.video_versions?.[0]?.url)) {
-            result.video_url = node.video_url || node.video_versions?.[0]?.url
-            result.cover_url = node.display_url || result.cover_url
-          } else {
-            const imgUrl = node.display_url || node.image_versions2?.candidates?.[0]?.url || ''
-            if (imgUrl) images.push(imgUrl)
-          }
-        }
-        if (images.length) result.images = images
-        if (result.video_url) result.success = true
-        if (!result.video_url && images.length) { result.success = true }
-      } else if (isVideo) {
-        result.video_url = mediaData.video_url ||
-                           mediaData.video_versions?.[0]?.url || ''
-        result.cover_url = mediaData.display_url ||
-                           mediaData.image_versions2?.candidates?.[0]?.url ||
-                           mediaData.thumbnail_src || ''
-        if (result.video_url) result.success = true
-      } else {
-        const imgUrl = mediaData.display_url ||
-                       mediaData.image_versions2?.candidates?.[0]?.url || ''
-        if (imgUrl) result.images = [imgUrl]
-        result.cover_url = imgUrl
-        if (imgUrl) result.success = true
-      }
-
-      if (result.success) return result
-    } catch (e) { /* fallback */ }
-    return null
+  const mapped: MediaResult = {
+    success: parsed.success,
+    platform: "instagram",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    images: parsed.images,
+    imagePreviews: parsed.imagePreviews,
+    cover_url: parsed.cover_url,
+    link: parsed.link || normalized,
+    error: parsed.error,
+    debug: parsed.debug,
   }
+  if (parsed.success) return mapped
 
-  // 先试 GraphQL
-  const gqlResult = await graphQLStrategy()
-  if (gqlResult) return gqlResult
+  const fallback = await instagramWebViewFallback(normalized, cookie)
+  if (fallback?.success) {
+    return { ...fallback, debug: [...(parsed.debug || []), ...(fallback.debug || [])] }
+  }
+  if (fallback?.error) return { ...mapped, error: fallback.error }
+  return mapped
+}
 
-  // ── Strategy 2: WebView 兜底（JSON-LD + video + og meta） ──
+/** Instagram 视频直链判定（排除头像、缩略图、blob） */
+function isInstagramVideoUrl(urlStr: string): boolean {
+  return !!urlStr && !urlStr.startsWith("blob:") && (
+    urlStr.includes(".mp4") ||
+    (/cdninstagram/.test(urlStr) && urlStr.includes("/v/")) ||
+    (/fbcdn/.test(urlStr) && urlStr.includes("video"))
+  )
+}
+
+/** WebView 兜底：注入登录态 + 强制校验「页面确实停在这个帖子」 */
+async function instagramWebViewFallback(url: string, cookie: string): Promise<MediaResult | null> {
+  const shortcode = instagramShortcode(url)
+  const result: MediaResult = { success: false, error: "", platform: "instagram", link: url }
   const webView = new WebViewController({ ephemeral: true })
   try {
-    webView.setCustomUserAgent(UA)
-    // 使用 ?l=1 参数绕过 Instagram 登录墙
-    const igUrl = normalizedUrl.includes('?') ? normalizedUrl + '&l=1' : normalizedUrl + '?l=1'
-    await webView.loadURL(igUrl)
-    await webView.waitForLoad()
-    await sleep(4000)  // 等待 React JS 渲染完成
+    // 实测：桌面 UA 的帖子页是空壳，iPhone UA 才会命中具体帖子
+    webView.setCustomUserAgent(IG_PAGE_UA)
+    await setPlatformCookies(webView, "instagram")
+    const igUrl = url.includes("?") ? url + "&l=1" : url + "?l=1"
+    await Promise.race([
+      webView.loadURL(igUrl),
+      new Promise<void>((resolve) => setTimeout(() => resolve(), 15000)),
+    ])
+    await webView.waitForLoad().then(() => true).catch(() => false)
+    await sleep(3500)
 
-    // 提取 video 元素（React 渲染后就有 currentSrc）
-    const extracted = await webView.evaluateJavaScript<any>(`
-      try {
-        var result = {};
-
-        // 1) video 元素 src（?l=1 模式 React 渲染后直接可用）
-        var v = document.querySelector('video');
-        if (v) {
-          var src = v.currentSrc || v.src || '';
-          if (src && src.indexOf('blob:') !== 0) result.videoUrl = src;
-          if (v.poster) result.poster = v.poster;
-        }
-
-        // 4) og:image / og:title
-        try { 
-          var ogI = document.querySelector('meta[property="og:image"]');
-          if (ogI) result.ogImage = ogI.content;
-        } catch(e) {}
-        try { 
-          var ogT = document.querySelector('meta[property="og:title"]');
-          if (ogT) result.ogTitle = ogT.content;
-        } catch(e) {}
-
-        // 5) document title
-        result.documentTitle = document.title || '';
-
-        // 6) 图片元素
-        var imgs = [];
-        var allImgs = document.querySelectorAll('img[src*="cdninstagram"],img[src*="fbcdn"]');
-        for (var k=0; k<allImgs.length; k++) {
-          var s = allImgs[k].src;
-          if (s && s.indexOf('data:') !== 0) imgs.push(s);
-        }
-        result.images = imgs.slice(0, 10);
-
-        // 7) performance 媒体资源（兜底）
-        if (!result.videoUrl && !result.ogVideo && !result.videoSrc) {
-          try {
-            var perfEntries = performance.getEntriesByType('resource');
-            for (var m=0; m<perfEntries.length; m++) {
-              var name = perfEntries[m].name;
-              if (name.indexOf('.mp4') > -1 || name.indexOf('/v/') > -1) {
-                result.videoUrl = name;
-                break;
-              }
-            }
-          } catch(e) {}
-        }
-
-        return result;
-      } catch(e) { return { error: e.message } }
+    const data = await webView.evaluateJavaScript<any>(`
+      (function () {
+        var out = { href: location.href, video: null, poster: null, ogTitle: null, ogImage: null };
+        try {
+          var v = document.querySelector('article video') || document.querySelector('main video') || document.querySelector('video');
+          if (v) { out.video = v.currentSrc || v.src || null; out.poster = v.poster || null }
+        } catch (e) {}
+        try { var t = document.querySelector('meta[property="og:title"]'); if (t) out.ogTitle = t.content } catch (e) {}
+        try { var i = document.querySelector('meta[property="og:image"]'); if (i) out.ogImage = i.content } catch (e) {}
+        return out;
+      })()
     `)
 
-    if (!extracted || extracted.error) {
-      result.error = extracted?.error || 'WebView 提取失败'
+    // ⚠️ 身份校验：页面必须停在目标帖子上，否则宁可失败也不返回别人的视频
+    const href = String(data?.href || "")
+    if (shortcode && !href.includes(shortcode)) {
+      result.error = `页面没有停在目标帖子（落点 ${href.slice(0, 70)}），已放弃以免下错内容`
       return result
     }
 
-    // 视频 URL 优先级：JSON-LD contentUrl > og:video > video src > performance
-    // Instagram 视频 URL 必须以 .mp4 结尾或包含 /v/ 路径，排除头像/缩略图
-    function isInstagramVideoUrl(urlStr: string): boolean {
-      return !!urlStr && !urlStr.startsWith('blob:') && (
-        urlStr.includes('.mp4') ||
-        (/cdninstagram/.test(urlStr) && urlStr.includes('/v/')) ||
-        (/fbcdn/.test(urlStr) && urlStr.includes('video'))
-      )
-    }
-
-    const videoCandidates: string[] = [extracted.videoUrl, extracted.ogVideo, extracted.videoSrc].filter(Boolean) as string[]
-    const videoUrl = videoCandidates.find(isInstagramVideoUrl) || ''
+    const videoUrl = [data?.video].filter(Boolean).find((u: string) => isInstagramVideoUrl(u)) || ""
     if (videoUrl) {
       result.video_url = videoUrl
+      result.videoUrls = [videoUrl]
+      result.cover_url = data?.poster || data?.ogImage || null
+      result.title = data?.ogTitle || ""
       result.success = true
-      result.cover_url = result.cover_url || extracted.thumbnailUrl || 
-                          extracted.poster || extracted.ogImage || ''
+      result.debug = [`WebView 兜底命中（${href.slice(0, 60)}）`]
+      return result
     }
-
-    // 标题
-    if (!result.title) {
-      result.title = extracted.ogTitle || extracted.documentTitle || ''
-    }
-
-    // 图片（仅当没有视频时）
-    if (extracted.images?.length && !result.video_url) {
-      result.images = extracted.images.map(function(u: any) { return u.replace(/\?.*$/, '') })
-      result.success = true
-    }
-
+    result.error = "页面已打开帖子，但仍未取到视频地址"
+    return result
+  } catch (error) {
+    result.error = `WebView 兜底失败：${error instanceof Error ? error.message : String(error)}`
+    return result
   } finally {
     webView.dispose()
   }
-
-  if (!result.success && !result.error) result.error = '无法从 Instagram 提取内容'
-  return result
 }
 
-// ─── Bilibili WBI 签名 ───────────────────────────────
-// WBI 签名表
-const MIXIN_KEY_ENC_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
-
-let cachedImgKey = ''
-let cachedSubKey = ''
-let cachedMixinKey = ''
-
-// WBI 签名使用内置 MD5
-function md5hex(content: string): string {
-  const data = Data.fromString(content)
-  if (!data) return ''
-  return Crypto.md5(data).toHexString()
-}
-
-function getMixinKey(imgKey: string, subKey: string): string {
-  const orig = imgKey + subKey
-  let result = ''
-  for (let i = 0; i < 32; i++) { result += orig[MIXIN_KEY_ENC_TAB[i]] }
-  return result
-}
-
-async function ensureWbiKeys(): Promise<void> {
-  if (cachedMixinKey) return
-  try {
-    const navUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
-    const resp = await fetch('https://api.bilibili.com/x/web-interface/nav', { headers: { 'User-Agent': navUA }, timeout: 8 })
-    const data = await resp.json()
-    const imgUrl: string = data?.data?.wbi_img?.img_url || ''
-    const subUrl: string = data?.data?.wbi_img?.sub_url || ''
-    cachedImgKey = imgUrl.split('/').pop()?.split('.')[0] || ''
-    cachedSubKey = subUrl.split('/').pop()?.split('.')[0] || ''
-    cachedMixinKey = getMixinKey(cachedImgKey, cachedSubKey)
-    console.log('[B站] WBI keys loaded:', cachedImgKey.slice(0,8), cachedSubKey.slice(0,8))
-  } catch (e) { console.log('[B站] WBI key fetch failed:', e) }
-}
-
-function wbiSign(params: Record<string, string>): Record<string, string> {
-  const wts = Math.floor(Date.now() / 1000).toString()
-  const filtered: Record<string, string> = { wts }
-  for (const [k, v] of Object.entries(params)) {
-    if (typeof v === 'string') filtered[k] = v.replace(/[!'()*]/g, '')
-    else filtered[k] = String(v).replace(/[!'()*]/g, '')
-  }
-  const keys = Object.keys(filtered).sort()
-  const query = keys.map(k => `${encodeURIComponent(k)}=${encodeURIComponent(filtered[k])}`).join('&')
-  const wRid = md5hex(query + cachedMixinKey)
-  filtered['w_rid'] = wRid
-  filtered['wts'] = wts
-  return filtered
-}
-
-// ─── Bilibili ──────────────────────────────────────────
+// ─── Bilibili ─────────────────────────────────────────
+// 逻辑都在 ./bilibili 模块里（WBI 签名、DASH / progressive 双通道、codec 感知选轨）。
+// 关键点：B 站高画质是 **DASH 音视频分离** —— 只下视频轨就会「没声音」。
+// 下载阶段（saveVideoToPhotos）会重新解析一次拿新鲜地址，必要时下载双轨并 ffmpeg 无损合轨。
 async function parseBilibili(url: string): Promise<MediaResult> {
-  const result: MediaResult = { success: false, error: '' }
-  const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15'
-  const REFERER = 'https://www.bilibili.com/'
-  result.platform = 'bilibili'
-  result.link = url
+  const cookie = await loadPlatformCookieForVideo("bilibili").catch(() => "")
+  const parsed = await parseBilibiliVideo(url, cookie)
 
-  // 加载用户配置的 Cookie（用于 1080p 画质）
-  let bilibiliCookie = ''
-  let bilibiliLoginStatus = ''
-  try {
-    const config = await loadCookies()
-    const rawCookie = config.bilibili || ''
-    if (rawCookie.trim()) {
-      // 始终使用用户配置的 Cookie，用于 playurl API
-      bilibiliCookie = rawCookie
-      // 验证有效性仅用于 UI 显示
-      try {
-        const navResp = await fetch('https://api.bilibili.com/x/web-interface/nav', {
-          headers: { 'User-Agent': UA, 'Cookie': rawCookie },
-          timeout: 8
-        })
-        const navData = await navResp.json()
-        if (navData?.data?.isLogin) {
-          bilibiliLoginStatus = '✅ 已登录'
-        } else {
-          bilibiliLoginStatus = '⚠️ Cookie 可能已失效'
-        }
-      } catch {
-        bilibiliLoginStatus = '⚠️ 验证超时'
-      }
-    }
-  } catch {}
-
-  let bvid = url.match(/\/video\/(BV[\w]+)/i)?.[1]
-  // b23.tv 短链解析
-  if (url.match(/b23\.tv/i) && !bvid) {
-    try {
-      const resp = await fetch(url, { headers: { 'User-Agent': UA } })
-      const html = await resp.text()
-      bvid = html.match(/\/video\/(BV[\w]+)/i)?.[1]
-    } catch {}
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "bilibili",
+    title: parsed.title,
+    author: parsed.author,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
   }
-  if (!bvid) { result.error = '无法提取BV号'; return result }
+  if (!parsed.success) return result
 
-  // 尝试 B 站 API，支持 BV 转 aid
-  async function getBilibiliVideo(bvid: string, aid?: string): Promise<boolean> {
-    // 视频信息 API
-    const infoUrl = aid
-      ? `https://api.bilibili.com/x/web-interface/view?aid=${aid}`
-      : `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`
-    const viewResp = await fetch(infoUrl, {
-      headers: { 'User-Agent': UA, 'Referer': REFERER, ...(bilibiliCookie ? { 'Cookie': bilibiliCookie } : {}) },
-      timeout: 10
-    })
-    const viewData = await viewResp.json()
-    if (viewData.code !== 0) return false
-
-    result.title = viewData.data.title || ''
-    result.author = viewData.data.owner?.name || ''
-    result.cover_url = viewData.data.pic || ''
-    const cid = viewData.data.cid
-    const aidResolved = viewData.data.aid
-    if (!cid || !aidResolved) return false
-
-    // B站 playurl — WBI 签名 + 多级画质 fallback
-    const cookie = bilibiliCookie || ''
-    const playurlHeaders = { 'User-Agent': UA, 'Referer': `https://www.bilibili.com/video/${bvid}/`, ...(cookie ? { 'Cookie': cookie } : {}) }
-    
-    // 确保 WBI keys 已加载
-    await ensureWbiKeys()
-    
-    // 尝试 DASH 高画质（WBI 签名）
-    try {
-      const signed1 = wbiSign({ avid: aidResolved, cid: cid, qn: '80', fnval: '4048', fnver: '0', fourk: '1' })
-      const params1 = Object.entries(signed1).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&')
-      const dashUrl = `https://api.bilibili.com/x/player/playurl?${params1}`
-      const playResp = await fetch(dashUrl, { headers: playurlHeaders, timeout: 10 })
-      const playData = await playResp.json()
-      console.log('[B站] playurl code:', playData.code, 'msg:', playData.message || '', 'durl:', playData.data?.durl?.length || 0, 'dash.video:', playData.data?.dash?.video?.length || 0)
-      if (playData.code !== 0) {
-        console.log('[B站] playurl failed:', JSON.stringify(playData).slice(0, 200))
-      }
-      if (playData.code === 0) {
-        const dash = playData.data?.dash
-        const durl = playData.data?.durl
-        
-        // 取 DASH 最高画质视频（按 id 降序排序，取第一个）
-        let dashVideoUrl = ''
-        let dashVideoQuality = 0
-        if (dash?.video?.length) {
-          const sorted = [...dash.video].sort((a, b) => (b.id || 0) - (a.id || 0))
-          const dv = sorted[0]
-          dashVideoUrl = dv.baseUrl || dv.backup_url?.[0] || ''
-          dashVideoQuality = dv.id || 0
-          console.log('[B站] DASH tracks:', sorted.map(v => v.id).join(','), '→ 选择:', dv.id, dv.codecs || '')
-        }
-        
-        if (durl?.length) {
-          const durlQuality = durl[0].quality || 0
-          console.log('[B站] durl 画质:', durlQuality)
-          result.success = true
-          if (cookie && dashVideoUrl && dashVideoQuality > durlQuality) {
-            result.video_url = dashVideoUrl
-            result.videoUrls = [durl[0].url]
-          } else {
-            result.video_url = durl[0].url
-            if (dashVideoUrl) result.videoUrls = [dashVideoUrl]
-          }
-          return true
-        }
-        
-        if (dashVideoUrl) {
-          result.video_url = dashVideoUrl
-          result.success = true
-          // MP4 1080p 兜底（也加 WBI 签名）
-          try {
-            const signed2 = wbiSign({ avid: aidResolved, cid: cid, qn: '80', fnval: '1', fnver: '0' })
-            const params2 = Object.entries(signed2).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&')
-            const mp4Resp = await fetch(`https://api.bilibili.com/x/player/playurl?${params2}`, { headers: playurlHeaders, timeout: 10 })
-            const mp4Data = await mp4Resp.json()
-            const mp4Durl = mp4Data.data?.durl
-            if (mp4Durl?.length && mp4Durl[0].url) {
-              result.videoUrls = [mp4Durl[0].url]
-            }
-          } catch {}
-          return true
-        }
-      }
-    } catch {}
-    return false
+  if (parsed.needsMux && parsed.dashVideoUrl) {
+    // DASH 画质更高 → 下载阶段会拉视频轨 + 音频轨再合轨
+    result.video_url = parsed.dashVideoUrl
+    result.videoUrls = [parsed.video_url || ""].filter(Boolean)
+    result.debug!.push(`将下载 DASH 音视频（${qnLabel(parsed.dashVideoQuality)}）并本地无损合轨`)
+  } else if (parsed.video_url) {
+    result.video_url = parsed.video_url
+    result.debug!.push(`使用 progressive 单文件（${qnLabel(parsed.progressiveQuality)}，自带声音）`)
+  } else {
+    result.video_url = parsed.dashVideoUrl || null
+    result.debug!.push("只有 DASH 地址，下载阶段会尝试合轨")
   }
+  return result
+}
 
-  try {
-    if (await getBilibiliVideo(bvid)) return result
+// ─── YouTube ───────────────────────────────────────────
+// 逻辑在 ./youtube：用 youtubei player 的 **ANDROID_VR 客户端**拿直链
+// （实测 WEB/MWEB 只给 signatureCipher 无直链，IOS/ANDROID 手机端直接 400）；
+// 1080p 以上是自适应流（视频/音频分离）→ 下载阶段自动与音频轨 ffmpeg 无损合轨。
+async function parseYouTube(url: string): Promise<MediaResult> {
+  const cookie = await loadPlatformCookieForVideo("youtube").catch(() => "")
+  const parsed = await parseYouTubeVideo(url, cookie)
 
-    // WebView 兜底
-    const webView = new WebViewController({ ephemeral: true })
-    try {
-      webView.setCustomUserAgent(UA)
-      await webView.loadURL(`https://www.bilibili.com/video/${bvid}/`)
-      await webView.waitForLoad()
-      await sleep(3000)
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "youtube",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    audio_url: parsed.audio_url,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
+  }
+  if (parsed.quality) result.debug!.push(`画质：${parsed.quality}`)
+  if (parsed.durationSeconds) result.debug!.push(`时长：${parsed.durationSeconds}s`)
+  return result
+}
 
-      await webView.evaluateJavaScript(`
-        (() => {
-          var v = document.querySelector('video')
-          if (v) { v.muted=true; v.play().catch(function(){}) }
-        })()
-      `)
-      await sleep(2000)
+// ─── 快手 ──────────────────────────────────────────────
+// 逻辑在 ./kuaishou：快手没有好用的公开 JSON 接口，但作品页 HTML 里带 Apollo 缓存
+// （`window.__APOLLO_STATE__` → `videoResource.h264` / `manifestH265`，脚本里**优先 H.264**）。
+// 命中风控（返回 `{"result":2}`）时自动换路由（`/fw/photo/{id}`）与 UA 重试。
+async function parseKuaishouLink(url: string): Promise<MediaResult> {
+  const cookie = await loadPlatformCookieForVideo("kuaishou").catch(() => "")
+  const parsed = await parseKuaishou(url, cookie)
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "kuaishou",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    images: parsed.images,
+    imagePreviews: parsed.imagePreviews,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
+  }
+  if (parsed.quality) result.debug!.push(`画质：${parsed.quality}`)
+  if (parsed.durationSeconds) result.debug!.push(`时长：${parsed.durationSeconds}s`)
+  return result
+}
 
-      const extracted = await webView.evaluateJavaScript<any>(`
-        try {
-          var v = document.querySelector('video source[src]')
-          if (!v) v = document.querySelector('video[src]')
-          if (v && v.src && !v.src.startsWith('blob:')) return { video_url: v.src }
-          if (window.__playinfo__) {
-            var pi = window.__playinfo__
-            var durl = pi.data?.durl || pi.durl || []
-            if (durl.length) return { video_url: durl[0].url || durl[0].backup_url?.[0] }
-            var dash = pi.data?.dash || pi.dash
-            if (dash) {
-              var vidArr = dash.video || []
-              if (vidArr.length) return { video_url: vidArr[vidArr.length-1].baseUrl }
-            }
-          }
-        } catch(e) {}
-        return null
-      `)
+// ─── 微信公众号 ────────────────────────────────────────
+// 逻辑在 ./wechat：文章页免登录；正文图片是**懒加载**的 `data-src`（`src` 只是占位图），
+// 这是拿到原图的关键；正文里的视频号/微信视频直链也一并提取。
+async function parseWeChatLink(url: string): Promise<MediaResult> {
+  const cookie = await loadPlatformCookieForVideo("wechat").catch(() => "")
+  const parsed = await parseWeChatArticle(url, cookie)
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "wechat",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    images: parsed.images,
+    imagePreviews: parsed.imagePreviews,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
+  }
+  return result
+}
 
-      if (extracted?.video_url) {
-        result.video_url = extracted.video_url; result.success = true
-      }
-    } finally {
-      webView.dispose()
-    }
-
-    if (!result.success) result.error = '无法获取B站视频播放地址'
-  } catch (e: any) { result.error = e.message || String(e) }
+// ─── 微信视频号 ────────────────────────────────────────
+// 逻辑在 ./wxchannels。⚠️ 视频号**必须**填「腾讯元宝 yuanbao.tencent.com 登录后的 Cookie」：
+// 先用元宝的公开解析接口把分享链接换成 channels 预览地址（带 token/eid），
+// 再用它换 H.264 直链。没配 Cookie 会直接提示，不会静默失败。
+async function parseWxChannelsLink(url: string): Promise<MediaResult> {
+  const cookie = await loadPlatformCookieForVideo("wxchannels").catch(() => "")
+  const parsed = await parseWxChannels(url, cookie)
+  const result: MediaResult = {
+    success: parsed.success,
+    platform: "wxchannels",
+    title: parsed.title,
+    author: parsed.author,
+    video_url: parsed.video_url,
+    videoUrls: parsed.videoUrls,
+    cover_url: parsed.cover_url,
+    link: parsed.link || url,
+    error: parsed.error,
+    debug: parsed.debug ? [...parsed.debug] : [],
+  }
+  if (parsed.quality) result.debug!.push(`画质：${parsed.quality}`)
+  if (parsed.durationSeconds) result.debug!.push(`时长：${parsed.durationSeconds}s`)
   return result
 }
 
@@ -2928,99 +1541,6 @@ async function parseTiktok(url: string): Promise<MediaResult> {
 }
 
 // ─── 快手 ──────────────────────────────────────────────
-async function parseKuaishou(url: string): Promise<MediaResult> {
-  const result: MediaResult = { success: false, error: '', platform: 'kuaishou', link: url }
-  const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
-
-  try {
-    // Resolve short links
-    let targetUrl = url
-    if (url.match(/v\.kuaishou\.com/i)) {
-      try {
-        const r = await fetch(url, { headers: { 'User-Agent': UA }, timeout: 15 })
-        const finalUrl = r.url || ''
-        if (finalUrl && finalUrl !== url) targetUrl = finalUrl
-      } catch {}
-    }
-
-    // Extract photoId
-    let photoId = ''
-    const pm = targetUrl.match(/\/(short-video|photo|fw\/photo)\/([\w-]+)/)
-    if (pm) photoId = pm[2]
-    else photoId = targetUrl.split('/').pop()?.split('?')[0] || ''
-    if (!photoId) { result.error = '无法提取快手视频ID'; return result }
-
-    // Strategy 1: GraphQL API
-    try {
-      const resp = await fetch('https://www.kuaishou.com/graphql', {
-        method: 'POST',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-          'Content-Type': 'application/json',
-          'Referer': 'https://www.kuaishou.com/',
-        },
-        body: JSON.stringify({
-          operationName: 'visionVideoDetail',
-          variables: { photoId, page: 'search' },
-          query: `query visionVideoDetail($photoId:String,$type:String,$page:String,$webPageArea:String){
-            visionVideoDetail(photoId:$photoId,type:$type,page:$page,webPageArea:$webPageArea){
-              status
-              author{id name}
-              photo{id duration caption coverUrl manifestH265 videoResource}
-            }
-          }`,
-        }),
-        timeout: 15,
-      })
-      const gqlData = await resp.json()
-      const photo = gqlData.data?.visionVideoDetail?.photo
-      if (photo) {
-        result.title = photo.caption || ''
-        result.author = gqlData.data.visionVideoDetail.author?.name || ''
-        result.cover_url = photo.coverUrl || null
-
-        let vr: any = photo.manifestH265
-        if (typeof vr === 'string') { try { vr = JSON.parse(vr) } catch { vr = null } }
-        if (!vr) {
-          let vrRaw: any = photo.videoResource
-          if (typeof vrRaw === 'string') { try { vrRaw = JSON.parse(vrRaw) } catch { vrRaw = null } }
-          vr = vrRaw?.h264
-        }
-        const repUrl: string | undefined = vr?.adaptationSet?.[0]?.representation?.[0]?.url
-        if (repUrl) { result.video_url = repUrl; result.success = true; return result }
-      }
-    } catch {}
-
-    // Strategy 2: WebView fallback
-    const webView = new WebViewController({ ephemeral: true })
-    try {
-      webView.setCustomUserAgent(UA)
-      await webView.loadURL(targetUrl)
-      await webView.waitForLoad()
-      await sleep(4000)
-
-      const extracted = await webView.evaluateJavaScript<any>(`
-        try {
-          var v = document.querySelector('video source[src]')
-          if (!v) v = document.querySelector('video[src]')
-          if (v && v.src && !v.src.startsWith('blob:')) return { video_url: v.src }
-          var scripts = document.querySelectorAll('script')
-          for (var s of scripts) {
-            var t = s.textContent || ''
-            var m = t.match(/"playUrl"\\s*:\\s*"(https?:\\/\\/[^"]+\\.mp4[^"]*)"/)
-            if (m) return { video_url: m[1].replace(/\\\\u002F/g, '/') }
-          }
-        } catch(e) {}
-        return null
-      `)
-
-      if (extracted?.video_url) { result.video_url = extracted.video_url; result.success = true }
-    } finally { webView.dispose() }
-
-    if (!result.success) result.error = '无法获取快手视频播放地址'
-  } catch (e: any) { result.error = e.message || String(e) }
-  return result
-}
 
 // ─── YouTube ───────────────────────────────────────────
 function extractYoutubeId(url: string): string | null {
@@ -3343,6 +1863,10 @@ const PARSERS: Record<string, (url: string) => Promise<MediaResult>> = {
   xiaohongshu: parseXiaohongshu,
   instagram: parseInstagram,
   bilibili: parseBilibili,
+  youtube: parseYouTube,
+  kuaishou: parseKuaishouLink,
+  wechat: parseWeChatLink,
+  wxchannels: parseWxChannelsLink,
 }
 
 async function parseGeneric(url: string): Promise<MediaResult> {
@@ -3477,6 +2001,78 @@ async function loadPlatformCookieForVideo(platform?: string): Promise<string> {
   }
 }
 
+/**
+ * B 站下载：高画质是 DASH（音视频分离），所以要按情况处理：
+ *  · progressive 单文件（自带声音）够好 → 直接下（快）
+ *  · DASH 画质更高 → 分块下载视频轨 + 音频轨，再用 ffmpeg `-c copy` **无损合轨**
+ * ⚠️ CDN 里混着 PCDN 节点（长连接会中途卡死），所以一律走分块下载。
+ */
+async function downloadBilibiliMedia(
+  input: string,
+  title: string | undefined,
+  cookie: string
+): Promise<{ ok: true; msg: string; bytes: number; path: string } | { ok: false; note: string }> {
+  const parsed = await parseBilibiliVideo(input, cookie)
+  if (!parsed.success) return { ok: false, note: parsed.error || "B站解析失败" }
+
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+    "Referer": "https://www.bilibili.com/",
+    ...(cookie ? { Cookie: cookie } : {}),
+  }
+  const stamp = Date.now()
+  const dir = FileManager.documentsDirectory
+  const fileName = ensureExt(safeFileName(title || parsed.title, `bili_${stamp}.mp4`), ".mp4")
+  const finalPath = dir + fileName
+  const tempVideo = `${dir}bili_v_${stamp}.mp4`
+  const tempAudio = `${dir}bili_a_${stamp}.m4s`
+  const tempMux = `${dir}bili_mux_${stamp}.mp4`
+
+  try {
+    let bytes = 0
+    let how = ""
+
+    if (parsed.needsMux && parsed.dashVideoUrl && parsed.dashAudioUrl) {
+      const v = await downloadToFile(parsed.dashVideoUrl, tempVideo, { headers })
+      if (!v.ok) throw new Error(`视频轨下载失败：${v.note}`)
+      const a = await downloadToFile(parsed.dashAudioUrl, tempAudio, { headers, directThreshold: 1024 * 1024 })
+      if (!a.ok) throw new Error(`音频轨下载失败：${a.note}`)
+      const muxed = await muxVideoAudio(tempVideo, tempAudio, tempMux)
+      if (!muxed.ok) throw new Error(`合轨失败：${muxed.note}`)
+      await Shell.run(`mv -f "${tempMux}" "${finalPath}"`, { timeout: 60 })
+      bytes = v.bytes + a.bytes
+      how = `DASH ${qnLabel(parsed.dashVideoQuality)} 音视频合轨（${muxed.via === "ffmpeg" ? "无损" : "重编码"}，${(muxed.duration || 0).toFixed(0)}s）`
+    } else if (parsed.video_url) {
+      const d = await downloadToFile(parsed.video_url, finalPath, { headers })
+      if (!d.ok) throw new Error(`下载失败：${d.note}`)
+      bytes = d.bytes
+      how = `progressive ${qnLabel(parsed.progressiveQuality)} 单文件（自带声音）`
+    } else if (parsed.dashVideoUrl) {
+      throw new Error("只有 DASH 视频轨且没有音频轨，无法合成带声音的视频")
+    } else {
+      throw new Error("没有拿到播放地址")
+    }
+
+    if (!(await FileManager.exists(finalPath))) throw new Error("下载后文件不存在")
+    let saved = await Photos.saveVideo(finalPath, { shouldMoveFile: false })
+    if (!saved) saved = await Photos.saveVideo(finalPath)
+    if (!saved) throw new Error("保存到相册失败")
+
+    return {
+      ok: true,
+      msg: `视频已保存到系统相册（B站 ${how}，${formatBytes(bytes)}）`,
+      bytes,
+      path: finalPath,
+    }
+  } catch (error) {
+    return { ok: false, note: error instanceof Error ? error.message : String(error) }
+  } finally {
+    await removeQuietly(tempVideo)
+    await removeQuietly(tempAudio)
+    await removeQuietly(tempMux)
+  }
+}
+
 async function saveVideoToPhotos(
   videoUrl: string,
   title?: string,
@@ -3484,13 +2080,16 @@ async function saveVideoToPhotos(
   platform?: string,
   videoId?: string,
   videoUrls?: string[],
-  videoUri?: string): Promise<{ msg: string; bytes: number; path?: string }> {
+  videoUri?: string,
+  audioUrl?: string): Promise<{ msg: string; bytes: number; path?: string }> {
   let downloadedBytes = 0
   // 构建多候选下载列表（抖音走多候选，其他平台走单 URL）
   interface Candidate { url: string; headers: Record<string, string>; label: string }
   const candidates: Candidate[] = []
+  /** 提前声明：B 站分支需要在候选循环之前写失败原因 */
+  let lastError = '所有下载候选均失败'
 
-  const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+  const UA = DY_DOWNLOAD_UA
 
   // 加载平台 Cookie（用于 CDN 下载）
   let platformCookie = ''
@@ -3499,6 +2098,42 @@ async function saveVideoToPhotos(
       const config = await loadCookies()
       platformCookie = ((config as any)[platform] || '').trim()
     } catch {}
+  }
+
+  // ─── 通用双轨合轨：视频轨 + 独立音频轨（YouTube 自适应流等）───
+  // 先试这条路：成功就直接返回；失败才继续走下面的候选逻辑（至少存下视频轨）
+  if (videoUrl && audioUrl && isValidDownloadUrl(videoUrl) && isValidDownloadUrl(audioUrl)) {
+    const stamp = Date.now()
+    const dir = FileManager.documentsDirectory
+    const finalPath = dir + ensureExt(safeFileName(title, `video_${stamp}.mp4`), '.mp4')
+    const tempVideo = `${dir}av_v_${stamp}.mp4`
+    const tempAudio = `${dir}av_a_${stamp}.m4a`
+    const tempMux = `${dir}av_m_${stamp}.mp4`
+    const trackHeaders: Record<string, string> = { 'User-Agent': UA, 'Accept': '*/*' }
+    if (platform === 'youtube') trackHeaders['Referer'] = 'https://www.youtube.com/'
+    try {
+      const v = await downloadToFile(videoUrl, tempVideo, { headers: trackHeaders })
+      if (!v.ok) throw new Error(`视频轨下载失败：${v.note}`)
+      const a = await downloadToFile(audioUrl, tempAudio, { headers: trackHeaders, directThreshold: 4 * 1024 * 1024 })
+      if (!a.ok) throw new Error(`音频轨下载失败：${a.note}`)
+      const muxed = await muxVideoAudio(tempVideo, tempAudio, tempMux)
+      if (!muxed.ok) throw new Error(`合轨失败：${muxed.note}`)
+      await Shell.run(`mv -f "${tempMux}" "${finalPath}"`, { timeout: 60 })
+      let saved = await Photos.saveVideo(finalPath, { shouldMoveFile: false })
+      if (!saved) saved = await Photos.saveVideo(finalPath)
+      if (!saved) throw new Error('保存到相册失败')
+      return {
+        msg: `视频已保存到系统相册（音视频合轨：${muxed.via === 'ffmpeg' ? '无损' : '重编码'}，${formatBytes(v.bytes + a.bytes)}）`,
+        bytes: v.bytes + a.bytes,
+        path: finalPath,
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    } finally {
+      await removeQuietly(tempVideo)
+      await removeQuietly(tempAudio)
+      await removeQuietly(tempMux)
+    }
   }
 
   if (platform === 'douyin') {
@@ -3514,6 +2149,18 @@ async function saveVideoToPhotos(
       'User-Agent': UA,
       'Accept': '*/*',
       'Origin': 'https://www.douyin.com',
+    }
+
+    // 0. 移动端免签通道：现场重取详情（60s 缓存），按短边选最高画质无水印直链
+    if (videoId) {
+      try {
+        const { detail } = await fetchDouyinDetailMobile(videoId)
+        if (detail?.video) {
+          for (const c of buildDouyinDownloadCandidates(detail.video)) {
+            candidates.push({ url: c.url, headers: { ...useCookie, Referer: pageRef } as Record<string, string>, label: `移动端${c.label}` })
+          }
+        }
+      } catch {}
     }
 
     // 1. snssdk 1080p 画质升级（下载时重新获取新鲜 CDN 直链，15s）
@@ -3559,6 +2206,23 @@ async function saveVideoToPhotos(
     if (isValidDownloadUrl(videoUrl) && !candidates.some(c => c.url === videoUrl || c.url === normalizeUrl(videoUrl))) {
       candidates.push({ url: normalizeUrl(videoUrl), headers: { ...useCookie, Referer: pageRef } as Record<string, string>, label: 'videoSrc' })
     }
+  } else if (platform === 'bilibili') {
+    // ─── B站：DASH 音视频分离 → 该合轨就合轨（无损 -c copy） ───
+    const biliCookie = platformCookie || ''
+    const biliNote: string[] = []
+    const done = await downloadBilibiliMedia(link || videoUrl, title, biliCookie)
+    if (done.ok) return { msg: done.msg, bytes: done.bytes, path: done.path }
+    biliNote.push(done.note)
+    // 兜底：把已知地址塞进通用候选，让下面那段多候选逻辑再试一次
+    const fallbackHeaders = {
+      'User-Agent': UA,
+      'Referer': 'https://www.bilibili.com/',
+      ...(biliCookie ? { Cookie: biliCookie } : {}),
+    }
+    for (const u of [videoUrl, ...(videoUrls || [])]) {
+      if (isValidDownloadUrl(u)) candidates.push({ url: normalizeUrl(u), headers: fallbackHeaders as Record<string, string>, label: 'B站兜底' })
+    }
+    lastError = `B站专用通道失败：${biliNote.join("；")}`
   } else {
     // ─── 非抖音平台：多策略（ParseHub 方案 + CDN 轮换）──
     // 收集所有候选 URL（从 videoUrl 和 videoUrls）
@@ -3617,7 +2281,6 @@ async function saveVideoToPhotos(
   }
 
   // ─── 依次尝试每个候选 ──────────────────────────────────
-  let lastError = '所有下载候选均失败'
   const maxAttempts = Math.min(candidates.length, 10) // 最多试前10个
   let attemptCount = 0
   for (const c of candidates) {
@@ -3756,7 +2419,8 @@ async function saveImagesToPhotos(imageUrls: string[], title?: string, referer?:
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       }
       // Instagram CDN 不能带 Referer，否则 403
-      if (effectiveReferer && platform !== 'instagram') headers['Referer'] = effectiveReferer
+      // Instagram / 小红书 CDN 都不要带 Referer，否则可能 403
+      if (effectiveReferer && platform !== 'instagram' && platform !== 'xiaohongshu') headers['Referer'] = effectiveReferer
       const resp = await fetch(deduped[i], { method: 'GET', timeout: 60, headers })
       if (!resp.ok) { lastError = `HTTP ${resp.status}`; continue }
       const bytes = await (resp as any).bytes()
@@ -3791,6 +2455,10 @@ interface CookieConfig {
   twitter: string
   instagram: string
   bilibili: string
+  youtube: string
+  kuaishou: string
+  wechat: string
+  wxchannels: string
 }
 
 function cookieStorageKey(): string {
@@ -3804,7 +2472,7 @@ async function loadCookies(): Promise<CookieConfig> {
   } catch {}
   return {
     xiaohongshu: "", douyin: "", twitter: "", instagram: "",
-    bilibili: ""
+    bilibili: "", youtube: "", kuaishou: "", wechat: "", wxchannels: ""
   }
 }
 
@@ -3864,7 +2532,11 @@ async function setPlatformCookies(webView: WebViewController, platform: string):
 
 const PLATFORM_ICON: Record<string, string> = {
   douyin: '🎵', twitter: '🐦', xiaohongshu: '📕',
-  instagram: '📸', bilibili: '📺'
+  instagram: '📸', bilibili: '📺',
+  youtube: '▶️',
+  kuaishou: '⚡️',
+  wxchannels: '🎥',
+  wechat: '💬'
 }
 
 const PLATFORM_SYSTEM_ICON: Record<string, string> = {
@@ -3873,6 +2545,10 @@ const PLATFORM_SYSTEM_ICON: Record<string, string> = {
   xiaohongshu: 'book.closed.fill',
   instagram: 'camera.fill',
   bilibili: 'play.tv.fill',
+  youtube: 'play.rectangle.fill',
+  kuaishou: 'bolt.circle.fill',
+  wxchannels: 'video.circle.fill',
+  wechat: 'bubble.left.and.text.bubble.right.fill',
 }
 
 const PLATFORM_TINT: Record<string, string> = {
@@ -3881,11 +2557,39 @@ const PLATFORM_TINT: Record<string, string> = {
   xiaohongshu: 'systemRed',
   instagram: 'systemPink',
   bilibili: 'systemBlue',
+  youtube: 'systemRed',
+  kuaishou: 'systemOrange',
+  wxchannels: 'systemGreen',
+  wechat: 'systemGreen',
 }
 
 const PLATFORM_NAME: Record<string, string> = {
   douyin: '抖音', twitter: 'Twitter/X', xiaohongshu: '小红书',
-  instagram: 'Instagram', bilibili: 'Bilibili'
+  instagram: 'Instagram', bilibili: 'Bilibili',
+  youtube: 'YouTube',
+  kuaishou: '快手',
+  wxchannels: '微信视频号',
+  wechat: '微信公众号'
+}
+
+/**
+ * 平台主色 —— 去掉平台图标后改用它做视觉锚点（只用文字与细色条，不用图标）。
+ * 颜色与各平台品牌色大致对应，方便一眼区分。
+ */
+const PLATFORM_ACCENT: Record<string, string> = {
+  douyin: 'systemPink',
+  twitter: 'systemBlue',
+  xiaohongshu: 'systemRed',
+  instagram: 'systemPurple',
+  bilibili: 'systemTeal',
+  youtube: 'systemRed',
+  kuaishou: 'systemOrange',
+  wxchannels: 'systemGreen',
+  wechat: 'systemGreen',
+}
+
+function platformAccent(platform: string): string {
+  return PLATFORM_ACCENT[platform] || 'secondaryLabel'
 }
 
 async function getClipboardText(): Promise<string> {
@@ -3975,7 +2679,7 @@ async function runIntentDownload(url: string) {
 
     if (r.video_url) {
       appendLog("正在下载视频...")
-      const videoResult = await saveVideoToPhotos(r.video_url, r.title, r.link, r.platform, r.videoId, r.videoUrls, r.videoUri)
+      const videoResult = await saveVideoToPhotos(r.video_url, r.title, r.link, r.platform, r.videoId, r.videoUrls, r.videoUri, r.audio_url || undefined)
       appendLog(videoResult.msg)
     } else if (r.images?.length) {
       appendLog("正在保存图片...")
@@ -4142,18 +2846,58 @@ function PlatformGlyph(props: {
   )
 }
 
-function FloatingAddButton(props: {
+function FloatingIconButton(props: {
+  systemImage: string
   onPress: () => void
+  iconSize?: number
   disabled?: boolean
 }) {
+  const iconSize = props.iconSize ?? 26
+  return (
+    <Button action={props.onPress} disabled={props.disabled} frame={{ width: 58, height: 58 }} glassEffect>
+      <Image systemName={props.systemImage} foregroundStyle="label" frame={{ width: iconSize, height: iconSize }} />
+    </Button>
+  )
+}
+
+/**
+ * 右下角浮动按钮组（交互与布局对齐 Media Downloader）：
+ * - 收起时只显示「+」，展开后显示「读取剪贴板」「手动输入链接」
+ * - 任务进行中只显示「停止」按钮
+ */
+function AddButtonCluster(props: {
+  visible: boolean
+  loading: boolean
+  onToggle: () => void
+  onPaste: () => void
+  onManual: () => void
+  onCancel: () => void
+}) {
+  if (props.loading) {
+    return (
+      <VStack
+        spacing={10}
+        padding={{ trailing: 18, bottom: 72 }}
+        frame={{ maxWidth: "infinity", maxHeight: "infinity", alignment: "bottomTrailing" as any }}
+      >
+        <FloatingIconButton systemImage="xmark.circle.fill" iconSize={36} onPress={props.onCancel} />
+      </VStack>
+    )
+  }
+
   return (
     <VStack
+      spacing={10}
       padding={{ trailing: 18, bottom: 72 }}
       frame={{ maxWidth: "infinity", maxHeight: "infinity", alignment: "bottomTrailing" as any }}
     >
-      <Button action={props.onPress} disabled={props.disabled} frame={{ width: 58, height: 58 }} glassEffect>
-        <Image systemName="plus" foregroundStyle="label" frame={{ width: 26, height: 26 }} />
-      </Button>
+      {props.visible ? (
+        <>
+          <FloatingIconButton systemImage="doc.on.clipboard" onPress={props.onPaste} />
+          <FloatingIconButton systemImage="square.and.pencil" onPress={props.onManual} />
+        </>
+      ) : null}
+      <FloatingIconButton systemImage={props.visible ? "xmark" : "plus"} onPress={props.onToggle} />
     </VStack>
   )
 }
@@ -4162,52 +2906,74 @@ function HistoryRow(props: {
   item: HistoryRecord
   onRefresh: () => Promise<void>
   onStatus: (text: string) => void
+  onRedownload: (url: string) => void
 }) {
-  const { item, onRefresh, onStatus } = props
+  const { item, onRefresh, onStatus, onRedownload } = props
 
   const openActions = async () => {
-    const fileExists = !!item.localFilePath
+    let hasFile = false
+    if (item.localFilePath) {
+      try { hasFile = await FileManager.exists(item.localFilePath) } catch { hasFile = false }
+    }
+    const isImagePost = item.mediaKind === "image"
+    const actions: { label: string; destructive?: boolean }[] = [
+      ...(hasFile ? [{ label: isImagePost ? "预览图片" : "播放视频" }] : []),
+      { label: "重新下载" },
+      ...(hasFile ? [{ label: "分享文件" }, { label: "保存到相册" }] : []),
+      { label: "打开原始页面" },
+      { label: "复制原始链接" },
+      { label: hasFile ? "删除记录并删除文件" : "删除记录", destructive: true },
+    ]
+
     const result = await Dialog.actionSheet({
       title: item.title || "(无标题)",
-      message: `${formatDate(item.createdAt)} · ${historyMediaSummary(item)}${item.saveSummary ? `\n${item.saveSummary}` : ''}`,
-      actions: [
-        { label: "分享文件" },
-        { label: "保存到相册" },
-        { label: "打开原始页面" },
-        { label: "复制原始链接" },
-        { label: "删除记录", destructive: true },
-      ],
+      message: `${PLATFORM_NAME[item.platform] || item.platform} · ${formatDate(item.createdAt)} · ${formatBytes(item.bytesWritten)} · ${historyMediaSummary(item)}${item.saveSummary ? `\n${item.saveSummary}` : ""}`,
+      actions,
       cancelButton: true,
     })
 
     if (result == null) return
+    const label = actions[result]?.label
 
     try {
-      if (result === 0) {
+      if (label === "播放视频" || label === "预览图片") {
+        if (!item.localFilePath) throw new Error("本地文件不存在")
+        await QuickLook.previewURLs([item.localFilePath], true)
+        return
+      }
+      if (label === "重新下载") {
+        onRedownload(item.pageURL)
+        return
+      }
+      if (label === "分享文件") {
         if (!item.localFilePath) throw new Error("本地文件不存在")
         await ShareSheet.present([item.localFilePath])
         onStatus("已打开分享面板。")
         return
       }
-      if (result === 1) {
+      if (label === "保存到相册") {
         if (!item.localFilePath) throw new Error("本地文件不存在")
-        await Photos.saveVideo(item.localFilePath)
+        if (isImagePost) await (Photos.savePhoto as any)(item.localFilePath)
+        else await Photos.saveVideo(item.localFilePath)
         onStatus("已保存到相册。")
         return
       }
-      if (result === 2) {
+      if (label === "打开原始页面") {
         await openURL(item.pageURL)
         return
       }
-      if (result === 3) {
+      if (label === "复制原始链接") {
         await Pasteboard.setString(item.pageURL)
         onStatus("已复制原始链接到剪贴板。")
         return
       }
-      if (result === 4) {
+      if (label === "删除记录并删除文件" || label === "删除记录") {
+        if (label === "删除记录并删除文件" && item.localFilePath) {
+          try { await FileManager.remove(item.localFilePath) } catch {}
+        }
         await deleteHistory(item.id)
         await onRefresh()
-        onStatus("已删除记录。")
+        onStatus(label === "删除记录并删除文件" ? "已删除记录和本地文件。" : "已删除记录。")
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -4238,19 +3004,31 @@ function HistoryRow(props: {
       }}
     >
       <VStack
-        frame={{ width: 56, height: 56, alignment: "center" as any }}
+        frame={{ width: 72, height: 96, alignment: "center" as any }}
         clipShape={{ type: "rect", cornerRadius: 8 }}
         background={{ style: "tertiarySystemFill", shape: { type: "rect", cornerRadius: 8 } }}
       >
-        <Text font="title2">{item.icon || "🔗"}</Text>
+        {item.thumbnailUrl ? (
+          <Image
+            imageUrl={item.thumbnailUrl}
+            resizable
+            scaleToFill
+            frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
+            clipShape={{ type: "rect", cornerRadius: 8 }}
+            placeholder={<PlatformGlyph platform={item.platform} size={34} />}
+          />
+        ) : (
+          <PlatformGlyph platform={item.platform} size={34} />
+        )}
       </VStack>
       <VStack alignment="leading" spacing={5} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
         <Text font="headline" lineLimit={2}>{item.title || "(无标题)"}</Text>
         <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>{historyMediaSummary(item)}</Text>
-        <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>{item.pageURL}</Text>
+        <Text font="caption2" foregroundStyle="secondaryLabel" lineLimit={1}>{item.pageURL}</Text>
         <HStack>
           <Text font="caption2" foregroundStyle="secondaryLabel">{PLATFORM_NAME[item.platform] || item.platform}</Text>
           <Spacer />
+          <Text font="caption2" foregroundStyle="secondaryLabel">{formatBytes(item.bytesWritten)}</Text>
           <Text font="caption2" foregroundStyle="secondaryLabel">{formatDate(item.createdAt)}</Text>
         </HStack>
       </VStack>
@@ -4265,9 +3043,11 @@ function HistoryPage(props: {
   onRefresh: () => Promise<void>
   onClear: () => Promise<void>
   onStatus: (text: string) => void
+  onRedownload: (url: string) => void
+  onOpenSavedFiles: () => void
   dismiss: () => void
 }) {
-  const { history, onRefresh, onClear, onStatus, dismiss } = props
+  const { history, onRefresh, onClear, onStatus, onRedownload, onOpenSavedFiles, dismiss } = props
 
   return (
     <NavigationStack>
@@ -4276,7 +3056,12 @@ function HistoryPage(props: {
         navigationBarTitleDisplayMode="inline"
         toolbar={{
           cancellationAction: <Button title="关闭" action={dismiss} />,
-          topBarTrailing: <Button title="刷新" action={() => void onRefresh()} />,
+          topBarTrailing: (
+            <HStack spacing={10}>
+              <Button title="" systemImage="folder" action={onOpenSavedFiles} />
+              <Button title="刷新" action={() => void onRefresh()} />
+            </HStack>
+          ),
         }}
       >
         <Section
@@ -4292,6 +3077,7 @@ function HistoryPage(props: {
                 item={item}
                 onRefresh={onRefresh}
                 onStatus={onStatus}
+                onRedownload={onRedownload}
               />
             ))
           )}
@@ -4330,7 +3116,14 @@ function ImageSelectionTile(props: {
             background={{ style: "systemBackground", shape: { type: "rect", cornerRadius: 6 } }}
           >
             {item.thumbnailUrl ? (
-              <Image imageUrl={item.thumbnailUrl} scaleToFit={true} frame={{ width: 128, height: 128 }} />
+              // ⚠️ 必须 resizable + 显式 frame：否则网络图片会按自身像素尺寸铺开（超大且发虚）
+              <Image
+                imageUrl={item.thumbnailUrl}
+                resizable
+                scaleToFill
+                frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
+                clipShape={{ type: "rect", cornerRadius: 6 }}
+              />
             ) : (
               <Image systemName="photo.fill" foregroundStyle="secondaryLabel" frame={{ width: 26, height: 26 }} />
             )}
@@ -4374,10 +3167,13 @@ function MediaSelectionRow(props: {
         background={{ style: "tertiarySystemFill", shape: { type: "rect", cornerRadius: 8 } }}
       >
         {item.thumbnailUrl ? (
+          // ⚠️ 同样必须 resizable，否则缩略图会被放大成一整块糊图
           <Image
             imageUrl={item.thumbnailUrl}
-            scaleToFit
-            frame={{ width: 88, height: 88 }}
+            resizable
+            scaleToFill
+            frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
+            clipShape={{ type: "rect", cornerRadius: 8 }}
           />
         ) : (
           <Image systemName={item.kind === "video" ? "play.rectangle.fill" : "photo.fill"} foregroundStyle="secondaryLabel" />
@@ -4406,12 +3202,16 @@ function DownloadPage(props: {
   onClearSelection: () => void
   onDownloadSelected: () => void
   onStopTask: () => void
+  onCopyStatus: () => void
+  onCopyLogs: () => void
+  onRetry: () => void
   dismiss: () => void
 }) {
   const {
     inputURL, parsedResult, mediaItems, selectedMediaIds, loading,
     downloadLogs, downloadProgress, status, logProxyRef,
-    onToggleMedia, onSelectAll, onClearSelection, onDownloadSelected, onStopTask, dismiss,
+    onToggleMedia, onSelectAll, onClearSelection, onDownloadSelected, onStopTask,
+    onCopyStatus, onCopyLogs, onRetry, dismiss,
   } = props
   const selectedCount = selectedMediaIds.length
   const videoItems = mediaItems.filter((item) => item.kind === "video")
@@ -4426,11 +3226,14 @@ function DownloadPage(props: {
           cancellationAction: <Button title="关闭" action={dismiss} />,
         }}
       >
-        <Section header={<Text>当前链接</Text>}>
+        <Section
+          header={<Text>当前链接</Text>}
+          footer={<Text font="caption" foregroundStyle="secondaryLabel">点按链接可重新解析。也可以点右下角「+」展开按钮读取剪贴板或手动输入。 </Text>}
+        >
           {inputURL ? (
-            <Text lineLimit={3}>{inputURL}</Text>
+            <Text lineLimit={3} onTapGesture={loading ? undefined : onRetry}>{inputURL}</Text>
           ) : (
-            <Text foregroundStyle="secondaryLabel">点击右下角 + 读取剪贴板链接并解析。</Text>
+            <Text foregroundStyle="secondaryLabel">点右下角「+」读取剪贴板链接，或手动输入链接后解析。</Text>
           )}
         </Section>
 
@@ -4502,9 +3305,9 @@ function DownloadPage(props: {
           </Section>
         ) : null}
 
-        <Section header={<Text>状态</Text>}>
+        <Section header={<Text>状态</Text>} footer={<Text font="caption" foregroundStyle="secondaryLabel">点按状态可复制当前进度文本。</Text>}>
           {loading ? (
-            <VStack alignment="leading" spacing={8}>
+            <VStack alignment="leading" spacing={8} onTapGesture={onCopyStatus}>
               <ProgressView value={downloadProgress.fraction} total={1} />
               <HStack spacing={10} alignment="center">
                 <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
@@ -4517,16 +3320,19 @@ function DownloadPage(props: {
               </HStack>
             </VStack>
           ) : (
-            <Text foregroundStyle="secondaryLabel">{status}</Text>
+            <Text foregroundStyle="secondaryLabel" onTapGesture={onCopyStatus}>{status}</Text>
           )}
         </Section>
 
-        <Section header={<Text>日志</Text>}>
+        <Section
+          header={<Text>日志</Text>}
+          footer={<Text font="caption" foregroundStyle="secondaryLabel">点按日志可复制全部内容。</Text>}
+        >
           <ScrollViewReader>
             {(proxy: any) => {
               logProxyRef.current = proxy
               return (
-                <ScrollView frame={{ maxWidth: "infinity", height: 220 }}>
+                <ScrollView frame={{ maxWidth: "infinity", height: 220 }} onTapGesture={onCopyLogs}>
                   <VStack alignment="leading" spacing={6} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
                     {downloadLogs.length === 0 ? (
                       <Text foregroundStyle="secondaryLabel">暂无日志。</Text>
@@ -4556,9 +3362,27 @@ function DownloadPage(props: {
 const COOKIE_PLATFORM_KEYS: [string, string][] = [
   ["douyin", "抖音"],
   ["xiaohongshu", "小红书"],
-  ["twitter", "Twitter/X"],
   ["bilibili", "Bilibili"],
+  ["kuaishou", "快手"],
+  ["wxchannels", "微信视频号"],
+  ["wechat", "微信公众号"],
+  ["youtube", "YouTube"],
+  ["instagram", "Instagram"],
+  ["twitter", "Twitter/X"],
 ]
+
+/** 未配置 Cookie 时的提示（Instagram 现在基本必须登录，不能再说「不影响」） */
+const COOKIE_EMPTY_HINT: Record<string, string> = {
+  instagram: "未配置 · 公开帖子免登录可用，填 Cookie 可提升受限帖成功率",
+  wxchannels: "必填 · 视频号需要腾讯元宝（yuanbao.tencent.com）登录后的 Cookie",
+  kuaishou: "可选 · 命中风控（解析失败）时填上可提高成功率",
+  wechat: "可选 · 文章页免登录，一般不用填",
+  youtube: "可选 · 仅年龄限制视频需要",
+}
+
+function cookieEmptyHint(platform: string): string {
+  return COOKIE_EMPTY_HINT[platform] || "未配置 · 不影响基础解析"
+}
 
 function SettingsIcon(props: {
   systemName: string
@@ -4626,41 +3450,129 @@ async function testPlatformCookie(platform: string, cookieValue: string): Promis
       return `检测失败：${message}`
     }
   }
+  if (platform === "wxchannels") {
+    // 视频号靠腾讯元宝的公开接口解析：直接拿这个接口试一把，最准
+    try {
+      const resp = await fetch("https://yuanbao.tencent.com/api/weixin/get_parse_result", {
+        method: "POST",
+        timeout: 15,
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+          Origin: "https://yuanbao.tencent.com",
+          Referer: "https://yuanbao.tencent.com/",
+          Cookie: trimmed,
+        },
+        body: JSON.stringify({ type: "video_channel_url", url: "https://weixin.qq.com/sph/AP07qUn2N0", scene: 1 }),
+      } as any)
+      if (resp.status === 401) return "HTTP 401 · Cookie 无效或未登录腾讯元宝（请先在 yuanbao.tencent.com 登录）"
+      const json: any = await resp.json().catch(() => null)
+      const code = json?.error ? String(json.error.code ?? "") : String(json?.code ?? "")
+      if (json?.error) {
+        if (code === "20000") return "接口返回 20000 · Cookie 无效或已过期（需重新登录元宝）"
+        return `接口返回错误：${json.error.message || code}`
+      }
+      if (json?.code === 0 || json?.data) return "Cookie 可用（元宝解析接口返回正常）"
+      return `HTTP ${resp.status} · 返回内容异常：${JSON.stringify(json).slice(0, 80)}`
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return `检测失败：${message}`
+    }
+  }
+  if (platform === "kuaishou") {
+    const notes = [`已配置 ${trimmed.length} 字符`]
+    if (!/(^|;\s*)did=/i.test(trimmed)) notes.push("提示：快手风控主要靠 did 等字段，未包含 did 可能无效")
+    return notes.join("\n")
+  }
+  if (platform === "wechat") {
+    return `已配置 ${trimmed.length} 字符。公众号文章页免登录，一般不需要填 Cookie。`
+  }
+  if (platform === "youtube") {
+    return `已配置 ${trimmed.length} 字符。YouTube 仅在年龄限制视频时需要 Cookie。`
+  }
   return `已配置 ${trimmed.length} 字符。该平台暂未提供在线检测，只做格式保存。`
 }
 
+/**
+ * 平台 Cookie 行（无图标版）：
+ * 左侧细色条 = 平台主色（已配置时亮起，未配置为淡色），下方状态点 + 文案，右侧文字入口。
+ * 整行点按弹出管理菜单（填写 / 检测 / 清除）。
+ */
 function CookieSettingsRow(props: {
   platform: string
   name: string
   hasCookie: boolean
   cookieLen: number
-  onEdit: () => void
-  onClear: () => void
-  onTest: () => void
+  emptyHint: string
+  onManage: () => void
 }) {
+  const accent = props.hasCookie ? platformAccent(props.platform) : 'quaternaryLabel'
   return (
-    <HStack spacing={12} alignment="center">
-      <PlatformGlyph platform={props.platform} />
-      <VStack spacing={3} alignment="leading" frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
-        <Text font="subheadline" fontWeight="medium">{props.name}</Text>
-        <Text font="caption" foregroundStyle={props.hasCookie ? "systemGreen" : "secondaryLabel"}>
-          {props.hasCookie ? `已配置 · ${props.cookieLen} 字符` : "未配置"}
+    <Button action={props.onManage}>
+      <HStack spacing={12} alignment="center">
+        <Rectangle
+          foregroundStyle={accent as any}
+          frame={{ width: 4, height: 40 }}
+          clipShape={{ type: "capsule", style: "continuous" }}
+        />
+        <VStack alignment="leading" spacing={5} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
+          <Text
+            font="subheadline"
+            fontWeight="semibold"
+            foregroundStyle={(props.hasCookie ? platformAccent(props.platform) : "label") as any}
+          >
+            {props.name}
+          </Text>
+          <HStack spacing={6} alignment="center">
+            <Rectangle
+              foregroundStyle={(props.hasCookie ? "systemGreen" : "tertiaryLabel") as any}
+              frame={{ width: 7, height: 7 }}
+              clipShape={{ type: "capsule", style: "continuous" }}
+            />
+            <Text font="caption" foregroundStyle={props.hasCookie ? "systemGreen" : "secondaryLabel"}>
+              {props.hasCookie ? `已配置 · ${props.cookieLen} 字符` : props.emptyHint}
+            </Text>
+          </HStack>
+        </VStack>
+        <Text
+          font="caption"
+          fontWeight="medium"
+          foregroundStyle={(props.hasCookie ? platformAccent(props.platform) : "secondaryLabel") as any}
+        >
+          {props.hasCookie ? "管理" : "填写"}
         </Text>
-      </VStack>
-      {props.hasCookie ? (
-        <Button action={props.onTest} frame={{ width: 34, height: 34 }}>
-          <Image systemName="checkmark.shield" foregroundStyle="systemGreen" frame={{ width: 18, height: 18 }} />
-        </Button>
-      ) : null}
-      {props.hasCookie ? (
-        <Button action={props.onClear} role="destructive" frame={{ width: 34, height: 34 }}>
-          <Image systemName="trash" foregroundStyle="systemRed" frame={{ width: 17, height: 17 }} />
-        </Button>
-      ) : null}
-      <Button action={props.onEdit} frame={{ width: 34, height: 34 }}>
-        <Image systemName={props.hasCookie ? "pencil" : "plus.circle"} foregroundStyle="systemBlue" frame={{ width: 18, height: 18 }} />
-      </Button>
-    </HStack>
+      </HStack>
+    </Button>
+  )
+}
+
+/** 支持的平台（无图标版）：等宽胶囊标签，用平台主色写字 */
+function SupportedPlatformsGrid() {
+  const entries = Object.entries(PLATFORM_NAME)
+  return (
+    <LazyVGrid
+      columns={[
+        { size: { type: "flexible", min: 86, max: "infinity" } },
+        { size: { type: "flexible", min: 86, max: "infinity" } },
+        { size: { type: "flexible", min: 86, max: "infinity" } },
+      ]}
+      spacing={8}
+      frame={{ maxWidth: "infinity" }}
+    >
+      {entries.map(([key, name]) => (
+        <Text
+          key={key}
+          font="caption"
+          fontWeight="medium"
+          foregroundStyle={platformAccent(key) as any}
+          frame={{ maxWidth: "infinity", alignment: "center" as any }}
+          padding={{ top: 8, bottom: 8 }}
+          background={{ style: "tertiarySystemFill", shape: { type: "capsule", style: "continuous" } }}
+        >
+          {name}
+        </Text>
+      ))}
+    </LazyVGrid>
   )
 }
 
@@ -4669,9 +3581,10 @@ function SettingsPage(props: {
   onSaveModeChange: (mode: "ask" | "photos") => void
   cookies: CookieConfig
   onCookiesChange: (config: CookieConfig) => void
+  onShowReleaseNotes: () => void
   dismiss: () => void
 }) {
-  const { saveMode, onSaveModeChange, cookies, onCookiesChange, dismiss } = props
+  const { saveMode, onSaveModeChange, cookies, onCookiesChange, onShowReleaseNotes, dismiss } = props
 
   const chooseSaveMode = async () => {
     const result = await Dialog.actionSheet({
@@ -4757,6 +3670,40 @@ function SettingsPage(props: {
     await saveCookies(updated)
   }
 
+  /** 点按平台行 → 管理菜单（因此不再需要图标按钮） */
+  const manageCookie = async (platform: string) => {
+    const platformName = PLATFORM_NAME[platform] || platform
+    const hasCookie = !!((cookies as any)[platform] || "").trim()
+    const actions: { label: string; destructive?: boolean }[] = [
+      { label: hasCookie ? "修改 Cookie" : "填写 Cookie" },
+    ]
+    if (hasCookie) {
+      actions.push({ label: "检测 Cookie 可用性" }, { label: "清除 Cookie", destructive: true })
+    }
+
+    const result = await Dialog.actionSheet({
+      title: `${platformName} Cookie`,
+      message: hasCookie
+        ? "已配置 Cookie。解析失败或画质偏低时可重新检测一次。"
+        : "未配置也能解析，填上 Cookie 后成功率与画质更稳（小红书 / Instagram 尤其明显）。",
+      actions,
+      cancelButton: true,
+    })
+    if (result == null) return
+
+    const label = actions[result]?.label
+    if (label === "填写 Cookie" || label === "修改 Cookie") {
+      await sleep(250)
+      await editCookie(platform)
+    } else if (label === "检测 Cookie 可用性") {
+      await testCookie(platform)
+    } else if (label === "清除 Cookie") {
+      await clearCookie(platform)
+    }
+  }
+
+  const configuredCount = COOKIE_PLATFORM_KEYS.filter(([key]) => !!((cookies as any)[key] || "").trim()).length
+
   return (
     <NavigationStack>
       <List
@@ -4778,49 +3725,145 @@ function SettingsPage(props: {
         </Section>
 
         <Section
-          header={<Text>平台 Cookie</Text>}
-          footer={<Text font="caption" foregroundStyle="secondaryLabel">Cookie 只用于提升解析成功率和画质。未配置时仍会使用基础解析。</Text>}
+          header={<Text>{`平台 Cookie · 已配置 ${configuredCount}/${COOKIE_PLATFORM_KEYS.length}`}</Text>}
+          footer={<Text font="caption" foregroundStyle="secondaryLabel">Cookie 只用于提升解析成功率和画质，未配置时仍会使用基础解析。点按平台即可填写、检测或清除。</Text>}
         >
           {COOKIE_PLATFORM_KEYS.map(([key, name]) => {
-            const hasCookie = !!((cookies as any)[key] || "").trim()
-            const cookieLen = ((cookies as any)[key] || "").trim().length
+            const value = ((cookies as any)[key] || "").trim()
             return (
               <CookieSettingsRow
                 key={key}
                 platform={key}
                 name={name}
-                hasCookie={hasCookie}
-                cookieLen={cookieLen}
-                onEdit={() => { void editCookie(key) }}
-                onClear={() => { void clearCookie(key) }}
-                onTest={() => { void testCookie(key) }}
+                hasCookie={!!value}
+                cookieLen={value.length}
+                emptyHint={cookieEmptyHint(key)}
+                onManage={() => { void manageCookie(key) }}
               />
             )
           })}
         </Section>
 
-        <Section header={<Text>支持的平台</Text>}>
-          <VStack alignment="leading" spacing={10} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
-            <HStack spacing={10}>
-              {Object.entries(PLATFORM_NAME).slice(0, 3).map(([k, v]) => (
-                <HStack key={k} spacing={7} alignment="center">
-                  <PlatformGlyph platform={k} size={28} />
-                  <Text font="caption" foregroundStyle="secondaryLabel">{v}</Text>
-                </HStack>
-              ))}
-            </HStack>
-            <HStack spacing={10}>
-              {Object.entries(PLATFORM_NAME).slice(3).map(([k, v]) => (
-                <HStack key={k} spacing={7} alignment="center">
-                  <PlatformGlyph platform={k} size={28} />
-                  <Text font="caption" foregroundStyle="secondaryLabel">{v}</Text>
-                </HStack>
-              ))}
-            </HStack>
-          </VStack>
+        <Section
+          header={<Text>{`支持的平台 · ${Object.keys(PLATFORM_NAME).length}`}</Text>}
+          footer={<Text font="caption" foregroundStyle="secondaryLabel">自动识别分享链接所属平台，解析后可自选要保存的视频与图片。</Text>}
+        >
+          <SupportedPlatformsGrid />
+        </Section>
+
+        <Section header={<Text>关于</Text>}>
+          <SettingsInfoRow
+            icon="info.circle"
+            tint="systemPurple"
+            title="视频解析下载"
+            subtitle="抖音解析/下载已改走移动端免签通道，无水印、最高画质"
+            value={`v${SCRIPT_VERSION}`}
+          />
+          <SettingsInfoRow
+            icon="wand.and.stars"
+            tint="systemPink"
+            title="更新说明"
+            subtitle="查看本次版本的改动内容"
+            onPress={onShowReleaseNotes}
+          />
         </Section>
       </List>
     </NavigationStack>
+  )
+}
+
+// ─── 版本与更新说明 ──────────────────────────────
+
+const SCRIPT_VERSION = "1.2.0"
+const SAVE_MODE_KEY = "video-parser:save-mode"
+const RELEASE_NOTES_SEEN_KEY = "video-parser:release-notes:seen-version"
+
+const RELEASE_NOTES: string[] = [
+  "新增 4 个平台：**YouTube / 快手 / 微信视频号 / 微信公众号**（主界面与分享面板都支持）。",
+  "**YouTube**：用 youtubei player 的 **ANDROID_VR 客户端**拿直链（实测 WEB/MWEB 只给 signatureCipher、IOS 与 ANDROID 手机端直接 400）；1080p 以上是自适应流（音视频分离）→ 自动下载两条轨并 **ffmpeg 无损合轨**。",
+  "**快手**：解析作品页 HTML 里的 Apollo 缓存（`window.__APOLLO_STATE__` → `videoResource.h264` / `manifestH265`），**优先 H.264**；命中风控会自动换路由与 UA 重试。",
+  "**微信公众号**：文章页免登录；正文图片是**懒加载**的 `data-src`（`src` 只是占位图）→ 这才是原图；正文里的视频号/微信视频直链也一并提取。",
+  "**微信视频号**：⚠️ **必须**在设置里填「腾讯元宝（yuanbao.tencent.com）登录后的 Cookie」；没填会明确提示，设置里可一键检测 Cookie 是否有效。",
+  "修复小红书短链识别：新增 **`xhslink.cn`**（以前只认 `xhslink.com`，所以 `xhslink.cn/o/xxx` 会报「未识别到支持的平台链接」）；顺带支持 `xhs.link`。",
+  "真机验证：`https://xhslink.cn/o/NKnTBeUcLT` → 跳转到带 xsec_token 的笔记页 → SSR 拿到 4 张原图（标题/作者均正确）。",
+  "修复小红书：改走**免签名 API 的笔记页 SSR**（`__INITIAL_STATE__.note.noteDetailMap`）—— 原来那套「签名 API + WebView 抓 DOM」已不可用（feed 接口被单独风控，实测 `code=300011 当前账号存在异常`）。",
+  "小红书现在必须带 `xsec_token`（分享链接自带）；缺了会直接提示「请从 App 分享→复制链接拿完整链接」，不再默默失败。",
+  "小红书视频选档改为**实测编码**：`stream` 家族名已从 h264/h265/av1 改成 `EF4/EF5/…`，字段分辨不出编码，于是用设备自带 ffprobe 实测每个候选，挑 iOS 能解码（H.264/HEVC）的最高分辨率档（实测选中 EF5 = 1080x1920 HEVC）。",
+  "图文帖用 trace id 重建**原图**地址（`sns-img-hw.xhscdn.com/{trace}`），预览另用小图；小红书 CDN 也不再带 Referer（防 403）。",
+  "顺带把小红书逻辑收进独立模块 `xiaohongshu.ts`（index.tsx 删掉 ~1200 行旧 WebView 兜底代码），分享面板同步走新通道。",
+  "修复 B 站视频「没声音」：B 站高画质是 **DASH 音视频分离**（video.m4s + audio.m4s），旧版只下视频轨。现在优先用 progressive 单文件（自带声音；登录即 1080P），DASH 画质更高时下载双轨并用 **ffmpeg `-c copy` 无损合轨**（实测 0.4 秒）。",
+  "新增分块下载器：B 站 CDN 里混着 PCDN 节点（`*.mountaintoys.cn:4483` / `*.mcdn.bilivideo.cn:8082`），长连接会中途卡死 —— 实测单次 fetch 下 3 分半的视频卡了 7 分钟没完，改 4MB 分块后 20MB/8 秒下完。",
+  "B 站选轨现在看**编码**：videos 里 avc1(H.264) > hev1/hvc1(HEVC) > av01(AV1，iOS 不能解码)，音频优先普通 AAC。",
+  "Instagram 画质升级（借鉴你那份 QX 脚本的实战结论）：视频从 `video_versions` 里挑 `type=101`（progressive）且**排除 DASH 分片**（`dashinit`/`bytestart`/`byteend`）的最大宽度档；图片不再用只有 640px 的 `display_url`，而是从 `image_versions2.candidates` 里挑面积最大的原图，网格预览另走中等尺寸。",
+  "Instagram 受限内容补救：新增 web GraphQL 通道（与 QX 脚本/ParseHub 同一套配方：同一 cookie jar 取 csrftoken + `X-IG-App-ID` + `x-csrftoken`）；并识别 `xdt_shortcode_media=null` / `utm_campaign=invalid` 这类受限标记，给出「需要登录/年龄验证」的明确提示。",
+  "Instagram 兼容性：支持 `XDTGraph*` 前缀类型名（XDTGraphVideo/Sidecar）与双层 stringify 的 `contextJSON`，caption 为纯字符串也能读。",
+  "修复 Instagram：改用**免登录的内嵌页通道**（`/p/{短码}/embed/captioned/` 里的 `contextJSON`），并支持图片帖与相册帖。",
+  "旧版 IG 的真因：写死的 GraphQL doc_id 已失效，于是掉到 WebView 里抓“页面上的第一个 video” —— 不是这个链接的视频；而且你这个链接本身就是**图片帖**（GraphImage），旧版只会找视频，于是随手抓了别人的视频。",
+  "现在每次命中都会**核对短码**（内嵌页、私有 API、帖子页三个通道都一样），宁可报错也绝不下错内容。",
+  "Instagram 加入设置页可配置 Cookie（公开帖子其实免登录就能解析，Cookie 只用于受限/私密帖）。",
+  "修复预览图「超大、发虚」：图片选择网格与视频行里的网络图少了 resizable —— 于是它按自身像素尺寸铺开，屏幕里只截到中间一小块并被放大（所以又大又糊）。现改为 resizable + scaleToFill + 圆角裁剪，缩略图填满卡片且清晰。",
+  "修复短链解析失败的根因：旧代码里 v.douyin.com 的判断正则被多转义了一层，导致分享短链永远匹配不上、拿不到作品 ID，于是绕开移动端通道去跑网页兜底，37 秒后才报「无法从抖音页面提取视频」。现已修正。",
+  "抖音逻辑收拢到独立模块 `douyin.ts`（index.tsx 与 intent.tsx 共用），自带短链展开、双主机重试与逐步诊断；日志里现在能看到「短链展开 / 详情状态 / 无水印候选数」。",
+  "解析失败时不再只报一句没用的提示，而是写出真因（如被平台过滤 filter_reason、主机 HTTP 状态、无作品 ID）。",
+  "设置页改版：平台 Cookie 与「支持的平台」全部去掉图标 —— Cookie 改用平台主色细色条 + 状态点，点按平台弹出「填写 / 检测 / 清除」菜单。",
+  "「支持的平台」改成等宽胶囊标签，用各平台主色写字（抖音粉 / 小红书红 / Instagram 紫 / Bilibili 青 / Twitter 蓝），一眼区分。",
+  "抖音解析/下载改走移动端免签通道（参考「镜花水月」）：网页接口被风控拦死后，移动端接口免签名、免 Cookie、免 uifid 就能直接拿无水印 CDN 直链。",
+  "去水印更彻底：playwm 自动转 play，并按短边（竖屏横屏通用）挑最高画质，直接命中 1440p / 1080p 标准编码档。",
+  "自动避开抖音自研编码（fourcc=bvc2）档位 —— 那是 iOS 既不能播也不能存相册的坑；需要那个分辨率时改用 play 接口 ratio 拿标准编码版本。",
+  "界面交互与布局对齐「Media Downloader」：右下角浮动按钮组（读取剪贴板 / 手动输入 / 停止）、Toast 提示、点按状态或日志即可复制。",
+  "历史记录支持封面缩略图、文件大小、预览播放、重新下载、删除文件，并新增「已保存文件」浏览器。",
+  "底部 Tab 去掉文字，只保留图标。",
+]
+
+/** 首次使用或版本变化时弹出底部更新说明（带拖拽条的半高 Sheet） */
+function useReleaseNotesSheet() {
+  const [presented, setPresented] = useState(false)
+
+  useEffect(() => {
+    let seen: string | null = null
+    try { seen = Storage.get<string>(RELEASE_NOTES_SEEN_KEY) } catch {}
+    if (seen !== SCRIPT_VERSION) setPresented(true)
+  }, [])
+
+  const onChanged = (next: boolean) => {
+    if (!next) {
+      try { Storage.set(RELEASE_NOTES_SEEN_KEY, SCRIPT_VERSION) } catch {}
+    }
+    setPresented(next)
+  }
+
+  return {
+    isPresented: presented,
+    onChanged,
+    content: <ReleaseNotesSheet onClose={() => onChanged(false)} />,
+  }
+}
+
+function ReleaseNotesSheet(props: { onClose: () => void }) {
+  return (
+    <VStack
+      spacing={16}
+      padding={{ top: 22, leading: 20, bottom: 24, trailing: 20 }}
+      presentationDetents={[380]}
+      presentationDragIndicator="visible"
+      frame={{ maxWidth: "infinity", alignment: "top" as any }}
+    >
+      <VStack spacing={6} alignment="center" frame={{ maxWidth: "infinity", alignment: "center" as any }}>
+        <Image systemName="wand.and.stars" foregroundStyle="systemPink" frame={{ width: 30, height: 30 }} />
+        <Text font="title3" bold>更新说明 · v{SCRIPT_VERSION}</Text>
+      </VStack>
+      <ScrollView frame={{ maxWidth: "infinity", maxHeight: 220 }}>
+        <VStack alignment="leading" spacing={10} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>
+          {RELEASE_NOTES.map((line, index) => (
+            <HStack key={`note-${index}`} spacing={8} alignment="top">
+              <Text font="caption" foregroundStyle="systemPink">●</Text>
+              <Text font="subheadline" lineSpacing={4} frame={{ maxWidth: "infinity", alignment: "leading" as any }}>{line}</Text>
+            </HStack>
+          ))}
+        </VStack>
+      </ScrollView>
+      <Button title="知道了" buttonStyle="borderedProminent" tint="systemPink" action={props.onClose} frame={{ maxWidth: "infinity" }} />
+    </VStack>
   )
 }
 
@@ -4849,11 +3892,31 @@ function View() {
   })
   const [downloadLogs, setDownloadLogs] = useState<string[]>([])
   const [history, setHistory] = useState<HistoryRecord[]>([])
-  const [saveMode, setSaveMode] = useState<"ask" | "photos">("ask")
+  const [saveMode, setSaveModeState] = useState<"ask" | "photos">("ask")
   const [cookies, setCookies] = useState<CookieConfig>({
     xiaohongshu: "", douyin: "", twitter: "", instagram: "",
-    bilibili: ""
+    bilibili: "", youtube: "", kuaishou: "", wechat: "", wxchannels: ""
   })
+  const [showAddActions, setShowAddActions] = useState(false)
+  const [toastMessage, setToastMessage] = useState("")
+  const [toastPresented, setToastPresented] = useState(false)
+  const releaseNotes = useReleaseNotesSheet()
+
+  const showToast = (message: string) => {
+    setToastMessage(message)
+    setToastPresented(false)
+    setTimeout(() => setToastPresented(true), 40)
+  }
+
+  const copyText = async (text: string, message: string) => {
+    await Pasteboard.setString(text)
+    showToast(message)
+  }
+
+  const setSaveMode = (mode: "ask" | "photos") => {
+    setSaveModeState(mode)
+    try { Storage.set(SAVE_MODE_KEY, mode) } catch {}
+  }
 
   const refreshHistory = async () => {
     const list = await loadHistory()
@@ -4888,9 +3951,13 @@ function View() {
     loadCookies()
       .then(setCookies)
       .catch(() => {})
+    try {
+      if (Storage.get<string>(SAVE_MODE_KEY) === "photos") setSaveModeState("photos")
+    } catch {}
   }, [])
 
   const downloadFromClipboard = async () => {
+    setShowAddActions(false)
     const clipboardText = await getClipboardText()
     if (!clipboardText) {
       setStatus("剪贴板中没有文本内容。")
@@ -4906,9 +3973,64 @@ function View() {
   const stopCurrentTask = () => {
     activeTaskRef.current += 1
     setLoading(false)
+    setShowAddActions(false)
     setDownloadProgress({ fraction: 0, stage: "已停止" })
     setStatus("已停止当前任务。")
     appendLog("任务已停止。")
+    showToast("已停止当前任务")
+  }
+
+  const toggleAddActions = () => {
+    setShowAddActions((current) => !current)
+  }
+
+  /** 手动输入链接（对齐 Media Downloader 的「手动输入」入口） */
+  const openManualAddDialog = async () => {
+    setShowAddActions(false)
+    const text = await Dialog.prompt({
+      title: "手动输入链接",
+      message: "支持抖音 / Twitter(X) / 小红书 / Instagram / Bilibili / 微博 等分享链接或分享文案。",
+      placeholder: "粘贴或输入链接…",
+      cancelLabel: "取消",
+      confirmLabel: "开始解析",
+      selectAll: true,
+    })
+    if (text == null) return
+    const nextInput = text.trim()
+    if (!nextInput) {
+      setStatus("没有输入内容。")
+      activeTab.setValue(DOWNLOAD_TAB)
+      return
+    }
+    setInputURL(nextInput)
+    activeTab.setValue(DOWNLOAD_TAB)
+    await parseFromInput(nextInput)
+  }
+
+  const copyDownloadLogs = async () => {
+    const logs = downloadLogs
+    await copyText(logs.length ? logs.join("\n") : "暂无日志。", "已复制日志到剪贴板。")
+  }
+
+  const copyDownloadStatus = async () => {
+    const text = loading ? `${downloadProgress.stage}（${Math.round(downloadProgress.fraction * 100)}%）` : (status || "准备就绪。")
+    await copyText(text, "已复制状态到剪贴板。")
+  }
+
+  const openSavedFiles = async () => {
+    await Navigation.present({
+      element: (
+        <NavigationStack>
+          <DirectoryBrowserView title="已保存文件" directoryPath={FileManager.documentsDirectory} />
+        </NavigationStack>
+      ),
+    })
+  }
+
+  const redownloadFromHistory = (url: string) => {
+    setInputURL(url)
+    activeTab.setValue(DOWNLOAD_TAB)
+    void parseFromInput(url)
   }
 
   const parseFromInput = async (overrideInput?: string) => {
@@ -5036,7 +4158,7 @@ function View() {
         setDownloadProgress({ fraction: 0.3, stage: "正在下载视频文件" })
         appendLog(`开始下载视频：${videoItem.url}`)
         primaryVideoUrl = videoItem.url
-        const result = await saveVideoToPhotos(videoItem.url, parsedResult.title, parsedResult.link, platform, parsedResult.videoId, parsedResult.videoUrls, parsedResult.videoUri)
+        const result = await saveVideoToPhotos(videoItem.url, parsedResult.title, parsedResult.link, platform, parsedResult.videoId, parsedResult.videoUrls, parsedResult.videoUri, parsedResult.audio_url || undefined)
         if (!isCurrentTask()) return
         appendLog(result.msg)
         downloadedBytes += result.bytes
@@ -5115,24 +4237,37 @@ function View() {
   }
 
   return (
-    <ZStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }}>
+    <ZStack
+      frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
+      sheet={releaseNotes as any}
+      toast={toastMessage ? {
+        message: toastMessage,
+        isPresented: toastPresented,
+        onChanged: setToastPresented,
+        position: "top",
+        duration: 2,
+      } : undefined}
+    >
       <TabView
         selection={activeTab as any}
         tint="systemPink"
         tabViewStyle="sidebarAdaptable"
         tabBarMinimizeBehavior="onScrollDown"
       >
-        <Tab title="历史记录" systemImage="clock.arrow.circlepath" value={HISTORY_TAB}>
+        {/* 底部 Tab 只留图标，不显示文字 */}
+        <Tab title="" systemImage="clock.arrow.circlepath" value={HISTORY_TAB}>
           <HistoryPage
             history={history}
             onRefresh={refreshHistory}
             onClear={handleClearHistory}
             onStatus={setStatus}
+            onRedownload={redownloadFromHistory}
+            onOpenSavedFiles={() => void openSavedFiles()}
             dismiss={dismiss}
           />
         </Tab>
 
-        <Tab title="下载" systemImage="arrow.down.circle.fill" value={DOWNLOAD_TAB}>
+        <Tab title="" systemImage="arrow.down.circle.fill" value={DOWNLOAD_TAB}>
           <DownloadPage
             inputURL={inputURL}
             parsedResult={parsedResult}
@@ -5148,23 +4283,31 @@ function View() {
             onClearSelection={clearMediaSelection}
             onDownloadSelected={() => void downloadSelectedMedia()}
             onStopTask={stopCurrentTask}
+            onCopyStatus={() => void copyDownloadStatus()}
+            onCopyLogs={() => void copyDownloadLogs()}
+            onRetry={() => void parseFromInput(inputURL)}
             dismiss={dismiss}
           />
         </Tab>
 
-        <Tab title="设置" systemImage="gearshape.fill" value={SETTINGS_TAB}>
+        <Tab title="" systemImage="gearshape.fill" value={SETTINGS_TAB}>
           <SettingsPage
             saveMode={saveMode}
             onSaveModeChange={setSaveMode}
             cookies={cookies}
             onCookiesChange={setCookies}
+            onShowReleaseNotes={() => releaseNotes.onChanged(true)}
             dismiss={dismiss}
           />
         </Tab>
       </TabView>
-      <FloatingAddButton
-        disabled={loading}
-        onPress={() => void downloadFromClipboard()}
+      <AddButtonCluster
+        visible={showAddActions}
+        loading={loading}
+        onToggle={toggleAddActions}
+        onPaste={() => void downloadFromClipboard()}
+        onManual={() => void openManualAddDialog()}
+        onCancel={stopCurrentTask}
       />
     </ZStack>
   )

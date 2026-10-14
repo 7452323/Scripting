@@ -1,0 +1,9 @@
+# Scripting App 项目
+.DS_Store
+*.swp
+*.swo
+*~
+
+# 本地脚本化笔记 / 临时文件
+memory/
+_ref_*

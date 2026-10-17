@@ -3,7 +3,7 @@ import {
   VStack, HStack, Text, Button, TextField,
   Spacer, ScrollView, Image, LazyVGrid, ProgressView,
   useState, useEffect, useMemo, useCallback, fetch, VideoPlayer,
-  NavigationStack, List, Section, GeometryReader,
+  NavigationStack, List, Section, GeometryReader, WebView,
 } from "scripting"
 import { abogus } from "./abogus"
 
@@ -18,7 +18,7 @@ const KEY_UIFID = "douyin_uifid"
 const KEY_DEVICE_ID = "douyin_device_id"
 const KEY_INSTALL_ID = "douyin_install_id"
 const KEY_SEEN_VERSION = "seen_version"
-const SCRIPT_VERSION = "1.0.29"
+const SCRIPT_VERSION = "1.0.37"
 
 // 运行时全局对象
 declare const screen: { width: number; height: number; scale: number } | undefined
@@ -28,6 +28,8 @@ interface VideoInfo {
   play_url: string; duration: number; digg_count: number
   comment_count: number; author_nickname: string; author_avatar: string; unique_id: string; author_ip_location: string
   images: ImageInfo[]
+  /** 1 = 作者置顶（服务端不一定给；给了就必须排在最前） */
+  is_top?: number
 }
 interface ImageInfo {
   url: string        // 静态图片 URL
@@ -1453,8 +1455,9 @@ async function resolveViaWebView(url: string): Promise<string> {
   const webView = new WebViewController({ ephemeral: true })
   try {
     webView.setCustomUserAgent(MOBILE_UA)
-    await webView.loadURL(url)
-    await webView.waitForLoad()
+    // 包超时：分享链重定向到验证码页/死链时 waitForLoad 会一直挂着
+    await timeoutFetch(webView.loadURL(url), 12000)
+    await timeoutFetch(webView.waitForLoad(), 12000)
     // 等待页面重定向和 JS 渲染完成
     let prevUrl = url
     for (let i = 0; i < 6; i++) {
@@ -1606,11 +1609,30 @@ function awemeToVideoInfo(item: any): VideoInfo {
     author_avatar: pickBestUrl(item.author?.avatar_larger?.url_list) || pickBestUrl(item.author?.avatar_medium?.url_list) || pickBestUrl(item.author?.avatar_thumb?.url_list),
     unique_id: item.author?.unique_id || "",
     author_ip_location: item.author?.ip_location || item.author?.ip_loc || item.author?.region || "",
+    is_top: Number(item.is_top) || 0,
     images: (item.images || []).map((img: any) => ({
       url: pickBestUrl(img.url_list),
       videoUrl: pickBestUrl(img.video?.play_addr?.url_list) || undefined,
     })).filter((img: ImageInfo) => img.url),
   }
+}
+
+/**
+ * 列表顺序**以服务端为准**。
+ * 为什么不能自己按时间重排：作者的置顶作品往往是老作品，抖音把置顶放在列表最前，
+ * 而接口**不返回 is_top**（实测 8 条全是 0）—— 客户端一重排就把置顶的两条打到列表最底，
+ * 看起来就像“置顶的作品没了”。
+ *
+ * 唯一兵底：整页**严格递增**（服务端反向，历史上 max_cursor=0 会出现）才整体反转。
+ */
+function fixOrder(list: VideoInfo[]): VideoInfo[] {
+  if (list.length < 2) return list
+  // 只有「每一项都比前一项新」才算客户端需要反转；降序（正常）或含置顶的混合顺序一律原样保留
+  let strictlyAscending = true
+  for (let i = 1; i < list.length; i++) {
+    if (!((list[i].create_time || 0) > (list[i - 1].create_time || 0))) { strictlyAscending = false; break }
+  }
+  return strictlyAscending ? list.slice().reverse() : list
 }
 
 function parseAwemeResponse(rawJson: string): { videos: VideoInfo[]; maxCursor: number; hasMore: boolean } {
@@ -1639,7 +1661,7 @@ function parseAwemeResponse(rawJson: string): { videos: VideoInfo[]; maxCursor: 
       return hasVideo || hasImages
     })
     .map(awemeToVideoInfo)
-  return { videos, maxCursor: data.max_cursor || 0, hasMore: data.has_more === 1 }
+  return { videos: fixOrder(videos), maxCursor: data.max_cursor || 0, hasMore: data.has_more === 1 }
 }
 
 async function fetchViaWebView(secUid: string, cursor: number = 0): Promise<string> {
@@ -1782,9 +1804,10 @@ async function ensureUifid(force: boolean = false): Promise<string> {
   }
   const webView = new WebViewController({ ephemeral: false })
   try {
-    await webView.loadURL("https://www.douyin.com/")
-    await webView.waitForLoad()
-    const cookies = await webView.getAllCookies()
+    // 包超时：风控/验证码页会让 waitForLoad 永不 resolve，卡死整条加载链
+    await timeoutFetch(webView.loadURL("https://www.douyin.com/"), 10000)
+    await timeoutFetch(webView.waitForLoad(), 10000)
+    const cookies = await timeoutFetch(webView.getAllCookies(), 5000)
     const hit = cookies.find((c) => c.name === "UIFID")
     const value = hit ? String(hit.value) : ""
     if (value) saveUifid(value)
@@ -1891,6 +1914,9 @@ const SHARE_USER_EXTRACT_JS = `return (()=>{
 })()`
 
 async function fetchUserPostsViaSharePage(secUid: string): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+  // 取数开始 = 这个 WebView 正忙：先把「45 秒后释放」的定时器撤掉，
+  // 否则上一轮延后的 dispose 可能正好在本次 evaluateJavaScript 途中把页面干掉。
+  if (_shareWvTimer) { clearTimeout(_shareWvTimer); _shareWvTimer = null }
   const wv = getShareWebView()
   try {
     await timeoutFetch(wv.loadURL(`https://m.douyin.com/share/user/${encodeURIComponent(secUid)}`), 20000)
@@ -1993,61 +2019,107 @@ function signerUsable() {
  *
  * 实现：Scripting 的 `Python.run` 直接跑 `pysign/sign` 包（cookie 只以字符串形式进内存，不落盘）。
  */
-async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number; ok: boolean }> {
   const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
   if (!cookie) throw new Error("没有 Cookie")
   const dir = resolvePysignDir()
+  // ⚠️ 首页**必须传 0**（2026-10-17 实测推翻 1.0.30 的结论）：
+  //    只有 max_cursor=0 才会把「作者置顶」的作品一起返回（is_top=1）。
+  //    实测账号 81170919561：cursor=0 的前两条就是置顶的 2025-01 / 2026-05 老作品；
+  //    传 Date.now() 时它俩完全不在结果里（时间窗口直接跳过了）。
+  //    置顶在前、其余时间降序；若服务端反过来给（历史上出现过），fixOrder() 会整体纠正。
+  const effCursor = cursor > 0 ? String(cursor) : "0"
+  const needTotal = cursor <= 0
   const L: string[] = []
-  L.push("import sys, json, ssl, urllib.request")
+  L.push("import sys, json, ssl, time, urllib.request")
   L.push("sys.path.insert(0, " + JSON.stringify(dir) + ")")
   L.push("from sign import sign_all")
   L.push("from sign.device import make_seed_device")
   L.push("dev = make_seed_device()")
   L.push("cookie = " + JSON.stringify(cookie))
-  L.push("params = {")
-  L.push("'device_platform':'iphone','aid':'1128','channel':'App%20Store','app_name':'aweme',")
-  L.push("'version_code':'40.4.0','version_name':'40.4.0','device_type':'iPhone17,3','os_version':'27.0.1',")
-  L.push("'iid':'7683339722235938341','device_id':'1923489864614387',")
-  L.push("'sec_user_id':" + JSON.stringify(secUid) + ",'max_cursor':" + JSON.stringify(String(cursor)) + ",'count':'30',")
-  L.push("'publish_video_strategy_type':'2','source':'0'}")
-  L.push("qs = '&'.join('%s=%s' % (k, v) for k, v in params.items())")
-  L.push("url = 'https://api5-normal-c-lq.amemv.com/aweme/v1/aweme/post/?' + qs")
-  L.push("h = sign_all(method='GET', url=url, body=b'', cookies=cookie, device=dev)")
-  L.push("req = urllib.request.Request(url)")
-  L.push("for k, v in h.items():")
-  L.push("    try: req.add_header(k, v)")
+  L.push("base = {'device_platform':'iphone','aid':'1128','channel':'App%20Store','app_name':'aweme',")
+  L.push(" 'version_code':'40.4.0','version_name':'40.4.0','device_type':'iPhone17,3','os_version':'27.0.1',")
+  L.push(" 'iid':'7683339722235938341','device_id':'1923489864614387'}")
+  L.push("def call(path, extra, tmo=12):")
+  L.push("    p = dict(base); p.update(extra)")
+  L.push("    qs = '&'.join('%s=%s' % (k, v) for k, v in p.items())")
+  L.push("    url = 'https://api5-normal-c-lq.amemv.com' + path + '?' + qs")
+  L.push("    h = sign_all(method='GET', url=url, body=b'', cookies=cookie, device=dev)")
+  L.push("    req = urllib.request.Request(url)")
+  L.push("    for k, v in h.items():")
+  L.push("        try: req.add_header(k, v)")
+  L.push("        except Exception: pass")
+  L.push("    try: req.add_header('Cookie', cookie)")
   L.push("    except Exception: pass")
-  L.push("try: req.add_header('Cookie', cookie)")
-  L.push("except Exception: pass")
-  L.push("req.add_header('User-Agent', 'Aweme/404017 CFNetwork/3896.100.1.2.1 Darwin/27.0.0')")
-  L.push("ctx = ssl._create_unverified_context()")
+  L.push("    req.add_header('User-Agent', 'Aweme/404017 CFNetwork/3896.100.1.2.1 Darwin/27.0.0')")
+  L.push("    r = urllib.request.urlopen(req, timeout=tmo, context=ssl._create_unverified_context())")
+  L.push("    return r.read().decode('utf-8', 'ignore')")
+  L.push("out = {}")
   L.push("try:")
-  L.push("    r = urllib.request.urlopen(req, timeout=25, context=ctx)")
-  L.push("    sys.stdout.write(r.read().decode('utf-8', 'ignore'))")
+  L.push("    out['post'] = call('/aweme/v1/aweme/post/', {'sec_user_id': " + JSON.stringify(secUid) + ", 'max_cursor': " + JSON.stringify(effCursor) + ", 'count': '30', 'publish_video_strategy_type': '2', 'source': '0'})")
   L.push("except Exception as e:")
-  L.push("    sys.stdout.write(json.dumps({'__err__': str(e)[:200]}))")
+  L.push("    out['err'] = str(e)[:200]")
+  if (needTotal) {
+    // 作品总数（aweme_count）：用于判断「是不是真的全了」——
+    // 未登录/仅好友可见的作品不会进 post 列表，旧版本却照样写「已加载全部作品」。
+    L.push("try:")
+    L.push("    out['user'] = call('/aweme/v1/user/', {'sec_user_id': " + JSON.stringify(secUid) + "}, 2)")
+    L.push("except Exception:")
+    L.push("    pass")
+  }
+  L.push("sys.stdout.write(json.dumps(out))")
   const res: any = await timeoutFetch(Python.run(L.join("\n")), 30000)
-  const text = String(res?.output || "")
-  if (!text) throw new Error("签名器没有输出")
-  const parsed = safeJSONParse(text) as any
-  if (parsed?.__err__) throw new Error("签名请求失败：" + String(parsed.__err__))
-  const list: any[] = Array.isArray(parsed?.aweme_list) ? parsed.aweme_list : []
+  const raw = String(res?.output || "")
+  if (!raw) throw new Error("签名器没有输出")
+  // Python 的 stdout 偶尔会被 App 自身的日志混入 → 只取 JSON 主体
+  let parsed: any = null
+  const bi = raw.indexOf("@@B@@"), ei = raw.lastIndexOf("@@E@@")
+  try { parsed = safeJSONParse(raw) } catch {
+    try { parsed = safeJSONParse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)) } catch { parsed = null }
+  }
+  if (bi >= 0 && ei > bi) { try { parsed = safeJSONParse(raw.slice(bi + 5, ei)) } catch { /* keep */ } }
+  if (!parsed) throw new Error("签名器返回无法解析")
+  if (parsed?.err) throw new Error("签名请求失败：" + String(parsed.err))
+  const post = typeof parsed.post === "string" ? safeJSONParse(parsed.post) : parsed.post
+  const list: any[] = Array.isArray(post?.aweme_list) ? post.aweme_list : []
   const videos: VideoInfo[] = list
     .filter((it: any) => Number(it?.aweme_type) !== 101)
     .map(awemeToVideoInfo)
     .filter((v: VideoInfo) => !!v.aweme_id && (!!v.play_url || v.images.length > 0))
+  // 顺序以服务端为准（置顶在最前）；只在整页反向时才反转，别再按时间重排
+  const ordered = fixOrder(videos)
+  // aweme_count：账号自己主页上「作品 N」的那个 N（含仅自己可见的作品）
+  let totalCount = 0
+  try {
+    const u = (typeof parsed.user === "string" ? safeJSONParse(parsed.user) : parsed.user)?.user
+    totalCount = Number(u?.aweme_count) || 0
+  } catch { totalCount = 0 }
   lastListSource = "signer"
-  return { videos, maxCursor: Number(parsed?.max_cursor) || 0, hasMore: Number(parsed?.has_more) === 1 }
+  // ok=true 表示「请求本身成功」：即使 aweme_list 为空（已翻到尾部），也不该再回退到分享页
+  return { videos: ordered, maxCursor: Number(post?.max_cursor) || 0, hasMore: Number(post?.has_more) === 1, totalCount, ok: true }
 }
 
-export async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+/** 最近一次签名通道拿到的「作品总数」（aweme_count，含仅自己可见的作品） */
+let lastAwemeCount = 0
+
+/** 单次取一页（内部用） */
+async function fetchUserPostsOnce(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
   let lastError: unknown = null
   // ① 主通道：登录态 + 你自己的 Python 签名包（完整分页、最快最全）
   if (signerUsable()) {
     try {
       const parsed = await fetchUserPostsViaSigner(secUid, cursor)
+      if (parsed.totalCount > 0) lastAwemeCount = parsed.totalCount
       if (parsed.videos.length > 0) return parsed
-    } catch (e) { lastError = e; markSignerDead() }
+      // 签名请求成功但列表为空 = 已经翻到底（不是通道失败）→ 直接当成功返回，
+      // 否则会去开分享页、把 cursor 重置、底部文案从「已加载全部」变成受限提示
+      if (parsed.ok) return parsed
+    } catch (e) {
+      lastError = e
+      // 超时属于排队/网络问题，不代表签名器坏了 —— 不要因此让它冷却 5 分钟
+      const msg = String((e as any)?.message || e)
+      if (msg.indexOf("timeout") < 0) markSignerDead()
+    }
   }
   // ② 移动端免签通道（现在基本返空，留着以防平台又放开）
   try {
@@ -2072,6 +2144,59 @@ export async function fetchUserPosts(secUid: string, cursor: number = 0): Promis
     return parseAwemeResponse(await fetchViaCookie(secUid, cursor))
   } catch (e) { lastError = e }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
+/** 上一次续拉（第 2/3 页）失败的原因；footer 用它区分「网络失败」与「未公开作品」 */
+let lastPartialError = ""
+
+/**
+ * 对外入口。
+ * ⭐ 首页额外做一件事：某些账号（小号）第一页只回几条但 has_more 仍是 true，
+ *   光拉一页会让人以为“作品就这么点” → 条目 < 20 时自动续拉（最多 2 页）、去重、重排。
+ */
+export async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number }> {
+  // 首屏重置总数：切用户后若新用户的签名通道失败，不能把上一个账号的 aweme_count 当成它的
+  if (cursor === 0) { lastAwemeCount = 0; lastPartialError = "" }
+  const first = await fetchUserPostsOnce(secUid, cursor)
+  // 只有首屏、且条目偏少、且还有更多时才续拉（用户翻页时不走这里）
+  if (cursor !== 0 || first.videos.length >= 20 || first.hasMore !== true) return { ...first, totalCount: lastAwemeCount }
+
+  const merged: VideoInfo[] = first.videos.slice()
+  const seen = new Set<string>(merged.map((v) => v.aweme_id))
+  let cur: number = first.maxCursor
+  let more: boolean = first.hasMore
+
+  const absorb = (list: VideoInfo[]) => {
+    for (const v of list) {
+      if (v.aweme_id && !seen.has(v.aweme_id)) { seen.add(v.aweme_id); merged.push(v) }
+    }
+  }
+
+  // 第 2 页
+  try {
+    const p2 = await fetchUserPostsOnce(secUid, cur)
+    absorb(p2.videos)
+    cur = p2.maxCursor
+    more = p2.hasMore === true
+  } catch (e) {
+    more = false
+    lastPartialError = String((e as any)?.message || e).slice(0, 60)
+  }
+
+  // 第 3 页（仍不足 20 条时）
+  if (more === true && merged.length < 20) {
+    try {
+      const p3 = await fetchUserPostsOnce(secUid, cur)
+      absorb(p3.videos)
+      cur = p3.maxCursor
+      more = p3.hasMore === true
+    } catch (e) {
+      more = false
+      lastPartialError = String((e as any)?.message || e).slice(0, 60)
+    }
+  }
+
+  return { videos: fixOrder(merged), maxCursor: cur, hasMore: more, totalCount: lastAwemeCount }
 }
 
 // ─── 获取用户完整资料 ───
@@ -2233,6 +2358,77 @@ async function fetchUserProfile(secUid: string): Promise<Partial<SavedUser> | nu
 }
 
 
+// ─── 抖音登录（内嵌浏览器登录 → 自动提取 Cookie） ───
+// 为什么需要：作品列表缺的那些是「未公开作品」，服务端只认真实登录会话；
+// 而旧的 Cookie 校验接口（im/user/info）长期假阳性，用户看不到「登录已失效」。
+// 这里顺手用 profile/self 复核一次，避免存进去又是一个假登录态。
+function DouyinLoginView({ onDone }: { onDone: (cookie: string) => void }) {
+  const dismiss = Navigation.useDismiss()
+  const controller = useMemo(() => new WebViewController({ ephemeral: false }), [])
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState("扫码或手机号登录，完成后点右上角「保存」")
+
+  useEffect(() => {
+    try {
+      controller.setCustomUserAgent(MOBILE_UA)
+      controller.loadURL("https://www.douyin.com/")
+    } catch { }
+    // ⚠️ 每次打开登录页都会 new 一个 WebViewController，不 dispose 会一直占着内存
+    return () => { try { controller.dispose() } catch { } }
+  }, [])
+
+  async function handleSave() {
+    setBusy(true)
+    setMsg("正在提取 Cookie...")
+    try {
+      const cookies = await controller.getAllCookies()
+      const list = (cookies || []).filter((c: any) => String(c.domain || "").indexOf("douyin.com") >= 0 && c.value)
+      // 同名 cookie 可能有多条（不同 domain/path）→ 按 name 去重，后写覆盖前写，避免拼接出重复键
+      const map = new Map<string, string>()
+      for (const c of list) map.set(String(c.name), String(c.value))
+      const str = Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join("; ")
+      if (!str || !hasDouyinAuthCookie(str)) {
+        setMsg("没拿到登录态（sessionid 缺失），请确认已经登录成功再保存")
+        setBusy(false)
+        return
+      }
+      const checked = await validateCookieString(str)
+      if (!checked.valid) {
+        setMsg("服务端仍判定未登录：" + checked.detail)
+        setBusy(false)
+        return
+      }
+      Storage.set(KEY_COOKIE, str)
+      // 新会话的 UIFID 可能还没写入；旧缓存属于上一个会话，清掉让 ensureUifid 重新取
+      clearUifid()
+      onDone(str)
+      dismiss()
+    } catch (e: any) {
+      setMsg("提取失败：" + String(e?.message || e))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <NavigationStack>
+      <VStack
+        spacing={0}
+        navigationTitle="登录抖音"
+        toolbar={{
+          topBarLeading: <Button title="取消" action={() => dismiss()} />,
+          topBarTrailing: busy ? <ProgressView /> : <Button title="保存" action={handleSave} />,
+        }}
+      >
+        <WebView controller={controller} frame={{ maxWidth: "infinity", maxHeight: "infinity" }} />
+        <HStack spacing={6} padding={10} frame={{ maxWidth: "infinity" }} background="secondarySystemBackground">
+          <Image systemName={busy ? "clock" : "info.circle"} font="caption" foregroundStyle="secondaryLabel" />
+          <Text font="caption2" foregroundStyle="secondaryLabel" frame={{ maxWidth: "infinity", alignment: "leading" }}>{msg}</Text>
+        </HStack>
+      </VStack>
+    </NavigationStack>
+  )
+}
+
 // ─── 切换用户弹窗 ───
 function SwitchUserView({ onSwitch, currentUid }: { onSwitch: (uid: string) => void; currentUid: string }) {
   const dismiss = Navigation.useDismiss()
@@ -2297,8 +2493,11 @@ async function validateCookieString(cookie: string): Promise<{ valid: boolean; d
     return { valid: false, detail: "未检测到登录 Cookie" }
   }
   try {
+    // ⚠️ 2026-10-17 真机实测：im/user/info 对**任何** Cookie 都回 status_code=0 + "url does not match"，
+    // 所以以前这里长期「假阳性」——设置页显示「Cookie 有效」，服务端其实早就不认这个会话了。
+    // 能真正判断登录态的只有 profile/self：未登录时回 status_code=8 / "用户未登录"。
     const resp = await fetch(
-      "https://www.douyin.com/aweme/v1/web/im/user/info/",
+      "https://www.douyin.com/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383&publish_video_strategy_type=2",
       {
         method: "GET",
         headers: {
@@ -2309,16 +2508,17 @@ async function validateCookieString(cookie: string): Promise<{ valid: boolean; d
         },
       }
     )
-    const text = await resp.text()
     if (!resp.ok) return { valid: false, detail: `检查失败: HTTP ${resp.status}` }
-    if (!text || text.trim().startsWith("<") || /login|passport/i.test(text)) {
-      return { valid: false, detail: "Cookie 未通过登录校验" }
-    }
+    const text = await resp.text()
     let json: any
     try { json = JSON.parse(text) } catch { return { valid: false, detail: "Cookie 校验返回异常" } }
-    if (json.status_code === 0) return { valid: true, detail: "Cookie 有效" }
+    const u = json?.user || {}
+    if (json.status_code === 0 && (u.uid || u.nickname)) {
+      return { valid: true, detail: `已登录：${u.nickname || u.uid}` }
+    }
+    if (json.status_code === 8) return { valid: false, detail: "登录已失效，请重新登录" }
     if (json.status_code === 3 || json.status_code === -99) return { valid: false, detail: "Cookie 已过期，请重新登录" }
-    return { valid: false, detail: `Cookie 校验失败: ${json.status_code ?? "未知状态"}` }
+    return { valid: false, detail: `校验失败: ${json.status_code ?? "未知状态"}` }
   } catch (e: any) {
     return { valid: false, detail: `检查失败: ${e.message || e}` }
   }
@@ -2343,6 +2543,19 @@ function VideoGridCard({ video, cardWidth, onOpen }: { video: VideoInfo; cardWid
       padding={{ horizontal: 4, vertical: 3 }}
       frame={{ width: cardWidth, height: GRID_CARD_HEIGHT, alignment: "top" }}
       background="systemBackground"
+      overlay={{
+        alignment: "topTrailing",
+        content: (
+          <VStack padding={7} allowsHitTesting={false}>
+            {video.is_top ? (
+              <HStack padding={{ horizontal: 6, vertical: 2 }} background="black" opacity={0.55} clipShape={{ type: "rect", cornerRadius: 4 }} spacing={3}>
+                <Image systemName="pin.fill" font="caption2" foregroundStyle="white" />
+                <Text font="caption2" foregroundStyle="white">置顶</Text>
+              </HStack>
+            ) : null}
+          </VStack>
+        ),
+      }}
     >
       <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} background="systemGray5" clipShape={{ type: "rect", cornerRadius: 8 }} clipped overlay={{ alignment: "center", content: (
         <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} background="black" opacity={0.001} onTapGesture={onOpen} />
@@ -2402,8 +2615,27 @@ const worksCache: {
   videos: VideoInfo[]
   cursor: number
   hasMore: boolean
+  totalCount: number
+  /** 这份缓存对应的 Cookie 指纹：登录/换号后变了就必须重拉，不能拿旧数据充数 */
+  cookieSig: string
   userInfo: { nickname: string; avatar: string }
-} = { uid: "", videos: [], cursor: 0, hasMore: false, userInfo: { nickname: "", avatar: "" } }
+} = { uid: "", videos: [], cursor: 0, hasMore: false, totalCount: 0, cookieSig: "", userInfo: { nickname: "", avatar: "" } }
+
+/** Cookie 指纹（长度 + 首尾 8 字符 + sessionid 片段）：只用来判断“登录态变了没”，不落盘完整凭据 */
+function cookieSignature(): string {
+  const c = (Storage.get<string>(KEY_COOKIE) || "").trim()
+  if (!c) return ""
+  const sid = (c.match(/(?:^|;\s*)sessionid=([^;]+)/) || ["", ""])[1] || ""
+  return `${c.length}:${c.slice(0, 8)}:${c.slice(-8)}:${sid.length}:${sid.slice(0, 6)}`
+}
+
+/**
+ * 首屏重拉的重入锁 + 请求序号。
+ * ⚠️ 必须互斥：两次并发重拉会让 Python 签名在串行队列里排队，后一个超时 →
+ * markSignerDead → 回退到分享页（条数更少）→ 把已经拿到的完整列表覆盖成残缺的。
+ */
+let resetInFlight: { uid: string; seq: number } | null = null
+let loadSeq = 0
 
 // ─── 主页 ───
 export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () => void; isActive: boolean; homeTab?: boolean }) {
@@ -2419,17 +2651,39 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   const [error, setError] = useState("")
   const [cursor, setCursor] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.cursor : 0))
   const [hasMore, setHasMore] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.hasMore : false))
+  const [totalCount, setTotalCount] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.totalCount : 0))
   const [loadingMore, setLoadingMore] = useState(false)
   const [userInfo, setUserInfo] = useState<{ nickname: string; avatar: string }>(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.userInfo : { nickname: "", avatar: "" }))
 
   async function doLoadVideos(reset: boolean, uidParam?: string) {
     const targetUid = uidParam || loadSecUid()
     if (!targetUid) { setError("请先设置抖音号"); return }
+    // 首屏重拉：同号重复请求直接丢弃（避免并发排队）；换了号则作废旧请求
+    if (reset) {
+      if (resetInFlight) {
+        if (resetInFlight.uid === targetUid) return
+        loadSeq++          // 作废旧号的请求（它的结果会被 seq 检查丢弃）
+        resetInFlight = null
+      }
+    }
+    const seq = ++loadSeq
+    if (reset) resetInFlight = { uid: targetUid, seq }
+    // 请求开始时的 Cookie 指纹：写入缓存时用它（而不是完成时），
+    // 否则刷新途中去登录，旧列表会被标成新签名 → 下次切回首页不会重拉。
+    const sigAtStart = cookieSignature()
     const c = reset ? 0 : cursor
-    if (reset) { setLoading(true); setVideos([]) } else { setLoadingMore(true) }
+    if (reset) {
+      setLoading(true); setVideos([]); setTotalCount(0); worksCache.totalCount = 0
+      // 切号时先把标题/头像换成目标号的（没有就清空），避免拉取失败时顶部还挂着上一个账号
+      const known = loadSavedUsers().find((u) => u.id === targetUid)
+      const pre = { nickname: known?.nickname || "", avatar: known?.avatar || "" }
+      setUserInfo(pre)
+      worksCache.userInfo = pre
+    } else { setLoadingMore(true) }
     setError("")
     try {
       const result = await fetchUserPosts(targetUid, c)
+      if (seq !== loadSeq) return   // 已经有更新的请求了，这次结果作废
       if (reset) {
         setVideos(result.videos)
         worksCache.videos = result.videos
@@ -2443,8 +2697,11 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       worksCache.uid = targetUid
       worksCache.cursor = result.maxCursor
       worksCache.hasMore = result.hasMore
+      worksCache.cookieSig = sigAtStart
+      if (result.totalCount > 0) worksCache.totalCount = result.totalCount
       setCursor(result.maxCursor)
       setHasMore(result.hasMore)
+      setTotalCount(worksCache.totalCount)
       if (result.videos.length > 0) {
         const first = result.videos[0]
         const info = { nickname: first.author_nickname, avatar: first.author_avatar }
@@ -2461,11 +2718,15 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
         }
       }
     } catch (e) {
-      const msg = (e as Error).message
-      setError(msg)
+      if (seq === loadSeq) setError((e as Error).message)
+    } finally {
+      // 只由「当前这次请求」释放锁，避免被丢弃的旧请求把锁提前清掉
+      if (reset && resetInFlight && resetInFlight.seq === seq) resetInFlight = null
+      if (seq === loadSeq) {
+        if (reset) setLoading(false)
+        else setLoadingMore(false)
+      }
     }
-    if (reset) setLoading(false)
-    else setLoadingMore(false)
   }
 
   useEffect(() => {
@@ -2477,10 +2738,35 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       doLoadVideos(true, activeUid)
       return
     }
-    // 同一用户：已经有缓存就不动 —— 切标签页 / 进详情返回都不重拉
-    if (worksCache.uid === activeUid && worksCache.videos.length > 0) return
+    // 同一用户：有缓存就不动 —— 切标签页 / 进详情返回都不重拉。
+    // ⚠️ 例外：Cookie 变过（刚去设置页「获取 Cookie」登录过）必须重拉 ——
+    // 登录前接口只给公开作品，登录后才多出未公开的那些（实测一次 4 条 → 8 条）。
+    if (worksCache.uid === activeUid && worksCache.videos.length > 0 && cookieSignature() === worksCache.cookieSig) return
     doLoadVideos(true, activeUid)
   }, [isActive])
+
+  // Home Tab 是常驻实例（切走/切回不会重建，改代码也不会热更新 → 长按 Home 图标 Reload）。
+  // 这里只做两件真实有价值的事：
+  //   1) 从别的 Tab 切回来时，如果 Cookie 变了（刚去设置页登录/刷新过）→ 自动重拉，不用再手动刷新；
+  //   2) 已经在首页又点一次 Home → 只在列表有缺口（videos < totalCount）时补拉，完整时不动。
+  useEffect(() => {
+    if (!inHomeTab) return
+    let lastCookie = Storage.get<string>(KEY_COOKIE) || ""
+    let off: (() => void) | null = null
+    try {
+      off = Script.onHomeTabEvent((event) => {
+        if (event === "selected") {
+          const cur = Storage.get<string>(KEY_COOKIE) || ""
+          if (cur !== lastCookie) { lastCookie = cur; doLoadVideos(true) }
+        } else if (event === "reselected") {
+          // 再点一次 Home：只在「还有下一页」时续拉一页（便宜）；
+          // 不能因为有未公开作品就整轮 reset（aweme_count 含私密作品，永远大于可拉取数）
+          if (worksCache.hasMore) doLoadVideos(false)
+        }
+      })
+    } catch { off = null }
+    return () => { try { off?.() } catch { } }
+  }, [])
 
   function handleSwitchUser(uid: string) {
     setSecUid(uid)
@@ -2501,6 +2787,12 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     </LazyVGrid>
   ), [videos, gridCardWidth])
 
+  // ⚠️ 2026-10-17 真机实测：接口返回的条目数会少于 aweme_count（实测 4 vs 7）。
+  // 差的那些是未公开作品（仅自己可见/朋友可见），服务端只对真实登录会话放出。
+  // 所以「已加载全部作品」不能硬编码，必须拿总数对比。
+  const listComplete = lastListSource === "signer" && !lastPartialError && (totalCount === 0 || videos.length >= totalCount)
+  const listShort = lastListSource === "signer" && !listComplete && (totalCount > videos.length || !!lastPartialError)
+
   return (
     <NavigationStack>
       <List
@@ -2519,7 +2811,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                 <Image systemName="arrow.clockwise" font="title3" />
               </Button>
               {inHomeTab ? (
-                <Button action={() => { Navigation.present(<SettingsView isActive={true} />) }}>
+                <Button action={() => { Navigation.present(<SettingsView isActive={true} onCookieChanged={() => { doLoadVideos(true) }} />) }}>
                   <Image systemName="gear" font="title3" />
                 </Button>
               ) : null}
@@ -2555,10 +2847,15 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                 <Text font="subheadline" foregroundStyle="systemRed">{error}</Text>
               </HStack>
               {error.includes("Cookie") || error.includes("__ac_signature") ? (
-                <VStack padding={12} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 10 }} spacing={6}>
-                  <Text font="caption" bold>💡 建议：</Text>
-                  <Text font="caption">在「设置」标签页填入有效的 douyin.com Cookie，可跳过 WebView 直接加载，速度快且稳定。</Text>
-                  <Text font="caption" foregroundStyle="tertiaryLabel">获取 Cookie：在 Safari 打开 douyin.com 并登录 → 开发者工具 → 复制 Cookie 字符串</Text>
+                <VStack padding={12} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 10 }} spacing={8} alignment="leading">
+                  <Text font="caption" bold>💡 建议</Text>
+                  <Text font="caption" foregroundStyle="secondaryLabel">登录抖音后会自动获取 Cookie，作品列表才能完整（含仅自己可见的作品）。</Text>
+                  <Button
+                    title="获取 Cookie"
+                    systemImage="person.crop.circle.badge.checkmark"
+                    buttonStyle="borderedProminent"
+                    action={() => { Navigation.present(<DouyinLoginView onDone={() => { doLoadVideos(true) }} />) }}
+                  />
                 </VStack>
               ) : null}
             </VStack>
@@ -2597,9 +2894,37 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                   )}
                 </VStack>
               ) : videos.length > 0 ? (
-                lastListSource === "signer" ? (
+                listComplete ? (
                   <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
                     <Text font="caption" foregroundStyle="tertiaryLabel">已加载全部作品</Text>
+                  </VStack>
+                ) : listShort ? (
+                  <VStack padding={14} spacing={10} frame={{ maxWidth: "infinity" }} alignment="leading">
+                    <HStack spacing={6} frame={{ maxWidth: "infinity" }}>
+                      <Image systemName={lastPartialError ? "exclamationmark.triangle.fill" : "eye.slash"} font="caption" foregroundStyle={lastPartialError ? "systemRed" : "systemOrange"} />
+                      <Text font="subheadline" bold frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                        {lastPartialError ? `已加载 ${videos.length} 条，分页请求失败` : `已显示 ${videos.length} / 共 ${totalCount} 条`}
+                      </Text>
+                    </HStack>
+                    <Text font="caption2" foregroundStyle="secondaryLabel" lineLimit={4} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                      {lastPartialError
+                        ? `其中一页没拉到（${lastPartialError}），点「重试」重新加载。`
+                        : `还有 ${totalCount - videos.length} 条属于「仅自己可见 / 朋友可见」，服务端只对真实登录会话放出——当前登录已失效。`}
+                    </Text>
+                    <HStack spacing={8} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                      <Button
+                        title="重新登录"
+                        systemImage="person.crop.circle.badge.checkmark"
+                        buttonStyle="borderedProminent"
+                        action={() => { Navigation.present(<DouyinLoginView onDone={() => { doLoadVideos(true) }} />) }}
+                      />
+                      <Button
+                        title="重试"
+                        systemImage="arrow.clockwise"
+                        buttonStyle="bordered"
+                        action={() => { doLoadVideos(true) }}
+                      />
+                    </HStack>
                   </VStack>
                 ) : (
                   <VStack padding={{ vertical: 14 }} spacing={10} frame={{ maxWidth: "infinity" }} alignment="center">
@@ -2725,7 +3050,7 @@ export function HistoryView({ dismissApp, isActive }: { dismissApp?: () => void;
 }
 
 // ─── 设置 ───
-export function SettingsView({ isActive }: { isActive: boolean }) {
+export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean; onCookieChanged?: () => void }) {
   const [inputValue, setInputValue] = useState("")
   const [cookieValue, setCookieValue] = useState("")
   const [saving, setSaving] = useState(false)
@@ -2821,17 +3146,12 @@ export function SettingsView({ isActive }: { isActive: boolean }) {
     const result = await validateCookieString(candidate)
     if (result.valid) {
       Storage.set(KEY_COOKIE, candidate)
+      clearUifid()
       setCookieValue("")
+      onCookieChanged?.()
     }
     setCookieStatus({ checking: false, valid: result.valid, detail: result.detail })
     setSavingCookie(false)
-  }
-
-  function handleCookieClear() {
-    Storage.remove(KEY_COOKIE)
-    clearUifid()
-    setCookieValue("")
-    setCookieStatus({ checking: false, valid: false, detail: "Cookie 已清除" })
   }
 
   async function handleSave() {
@@ -2990,13 +3310,21 @@ export function SettingsView({ isActive }: { isActive: boolean }) {
                 />
               )}
               <VStack spacing={0} alignment="leading">
-                <Text font="body" bold>{cookieStatus.checking ? "正在校验..." : (cookieStatus.valid ? "Cookie 有效" : "Cookie 无效")}</Text>
-                <Text font="caption" foregroundStyle="secondaryLabel">{cookieStatus.checking ? "" : cookieStatus.detail}</Text>
+                <Text font="body" bold>抖音登录</Text>
+                <Text font="caption" foregroundStyle="secondaryLabel">{cookieStatus.checking ? "正在校验..." : cookieStatus.detail}</Text>
               </VStack>
               <Spacer />
-              {cookieStatus.valid ? (
-                <Button title="清除 Cookie" role="destructive" buttonStyle="borderless" action={handleCookieClear} />
-              ) : null}
+              <Button
+                title="获取 Cookie"
+                buttonStyle="borderless"
+                disabled={cookieStatus.checking}
+                action={() => {
+                  Navigation.present(<DouyinLoginView onDone={(ck: string) => {
+                    validateCookieString(ck).then((r) => setCookieStatus({ checking: false, valid: r.valid, detail: r.detail }))
+                    onCookieChanged?.()
+                  }} />)
+                }}
+              />
             </HStack>
 
             {!cookieStatus.valid ? (
@@ -3069,14 +3397,84 @@ export function SettingsView({ isActive }: { isActive: boolean }) {
 // ─── 版本更新说明（新版本首次打开时以底部 Sheet 展示） ───
 const UPDATE_NOTES: { version: string; date: string; items: string[] }[] = [
   {
+    version: "1.0.37",
+    date: "2026-10-17",
+    items: [
+      "修复：切换账号后短暂显示上一个账号的作品和昵称",
+      "修复：一次请求超时会让作品只剩 15 条，且 5 分钟内不恢复",
+      "修复：滑到最后一页会突然只剩 15 条",
+      "修复：分页失败被误报成「作品仅自己可见」",
+      "修复：在首页再点一次 Home 会整轮重新加载",
+      "修复：登录后首页不自动刷新",
+      "修复：反复打开登录页会占用内存",
+      "优化：首屏请求超时收紧，加载更快",
+    ],
+  },
+  {
+    version: "1.0.36",
+    date: "2026-10-17",
+    items: [
+      "修复：置顶作品不显示",
+      "新增：置顶作品卡片显示「置顶」角标",
+    ],
+  },
+  {
+    version: "1.0.35",
+    date: "2026-10-17",
+    items: [
+      "修复：置顶作品被排到列表末尾",
+      "修复：连续刷新会导致列表变少",
+      "修复：列表偶发顺序颠倒（最旧在前）",
+    ],
+  },
+  {
+    version: "1.0.34",
+    date: "2026-10-17",
+    items: [
+      "修复：登录后「运行脚本」入口仍显示登录前的旧列表",
+      "优化：列表排序改为置顶优先",
+    ],
+  },
+  {
+    version: "1.0.33",
+    date: "2026-10-17",
+    items: [
+      "新增：从设置页登录后切回首页，列表自动刷新",
+      "优化：再点一次 Home 只在有下一页时补拉",
+    ],
+  },
+  {
+    version: "1.0.32",
+    date: "2026-10-17",
+    items: [
+      "新增：设置页「获取 Cookie」，一键登录抖音并自动保存",
+      "修复：登录态失效时仍显示「Cookie 有效」",
+      "修复：作品显示不全（未公开作品拿不到）",
+      "优化：作品页显示「已显示 4 / 共 7 条」并给出重新登录入口",
+    ],
+  },
+  {
+    version: "1.0.31",
+    date: "2026-10-17",
+    items: [
+      "修复小号作品显示不全（如 8 条只显示 4 条）：首页条目 < 20 时自动续拉最多 2 页",
+      "自动跨页按 aweme_id 去重，合并后重新按发布时间降序排",
+    ],
+  },
+  {
+    version: "1.0.30",
+    date: "2026-10-17",
+    items: [
+      "修复：作品只显示最早的几条，刷新也拉不到最新",
+      "优化：列表按发布时间展示",
+    ],
+  },
+  {
     version: "1.0.29",
     date: "2026-10-14",
     items: [
-      "⭐ 作品页恢复完整列表 + 真翻页：在 App 内用你仓库的 Python 签名包签请求（Python.run）",
-      "实测 30 条 / 2.3MB / has_more=1 / 可无限下滑 / 自带播放地址（比分享页的 15 条强很多）",
-      "这是唯一可行的路：作品接口对匿名请求一律返空（带全签名也一样），必须带登录会话",
-      "Cookie 只以字符串进内存、不落盘；签名失败时自动回退到分享页通道",
-      "底部文案按来源区分：完整分页显示「已加载全部作品」，回退时才提示受限",
+      "修复：作品列表不完整、不能翻页",
+      "新增：登录后可完整加载全部作品，下滑继续加载",
     ],
   },
   {

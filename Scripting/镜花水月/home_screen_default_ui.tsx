@@ -10,7 +10,11 @@
  *   · 这里也**不再包 NavigationStack** —— HomeView 自己已经带了一个，再包就成嵌套
  *
  * 状态常驻：切到别的 Tab 再切回来不会重建；改完代码要在 tab bar 上长按
- * Home 图标 → Reload 才会生效。
+ * Home 图标 → Reload 才会生效（编辑器菜单里的 Preview Home Screen UI 看的是磁盘上最新文件）。
+ *
+ * Tab 事件（`Script.onHomeTabEvent`）在 `HomeView` 内部注册，分两种：
+ *   · selected（从别的 Tab 切回）→ Cookie 变过就自动重拉（刚去登录过）
+ *   · reselected（已在首页又点一次）→ 只在列表有缺口时补拉
  */
 import { HomeView } from "./shared"
 

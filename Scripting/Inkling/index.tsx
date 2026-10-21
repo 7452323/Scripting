@@ -1,5 +1,4 @@
 // Inkling —— 微信读书划线回顾
-// UI 参考 Booko / 随手摘 / 书影 的真实交互：封面墙 + 卡片回顾 + 翻页器
 import {
   VStack, HStack, ZStack, Text, Image, Button, TextField, SecureField,
   Spacer, ProgressView, ScrollView, LazyVGrid, LazyVStack,

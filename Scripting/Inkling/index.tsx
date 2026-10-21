@@ -6,7 +6,7 @@ import {
   NavigationStack, NavigationLink, Navigation,
   Rectangle, RoundedRectangle,
   TabView, Tab,
-  useState, useEffect, useObservable,
+  useState, useEffect, useObservable, useRef,
   Script,
 } from "scripting"
 
@@ -18,6 +18,8 @@ const ACCENT = "systemIndigo"
 const PAGE_BG = "systemGroupedBackground"
 const CARD_BG = "secondarySystemGroupedBackground"
 
+const GRID_COLUMNS = [{ size: { type: "adaptive" as const, min: 96, max: 132 } }]
+
 const MODE_LABEL: Record<Weread.ReadMode, string> = {
   weekly: "本周",
   monthly: "本月",
@@ -28,9 +30,10 @@ const MODE_LABEL: Record<Weread.ReadMode, string> = {
 // ===== 本地缓存 =====
 const K_BOOKS = "inkling_books"
 const K_NOTES_PREFIX = "inkling_notes_"
+const K_FETCHED = "inkling_fetched"
 const K_SYNC = "inkling_lastSync"
 const K_CACHE_VER = "inkling_cache_ver"
-const CACHE_VERSION = "3"
+const CACHE_VERSION = "4"
 const KCM_KEY = "inkling_api_key"
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -44,7 +47,12 @@ function readJSON<T>(key: string, fallback: T): T {
 function loadBooks(): NotebookEntry[] {
   // 缓存结构变更时强制重拉，避免旧数据（无标题）残留
   if (Storage.get(K_CACHE_VER) !== CACHE_VERSION) {
+    const old = readJSON<NotebookEntry[]>(K_BOOKS, [])
+    for (const b of old) {
+      if (b && b.bookId) Storage.remove(K_NOTES_PREFIX + b.bookId)
+    }
     Storage.remove(K_BOOKS)
+    Storage.remove(K_FETCHED)
     Storage.set(K_CACHE_VER, CACHE_VERSION)
     __allNotesCache = null
     return []
@@ -53,6 +61,7 @@ function loadBooks(): NotebookEntry[] {
 }
 function saveBooks(b: NotebookEntry[]) {
   Storage.set(K_BOOKS, JSON.stringify(b))
+  __allNotesCache = null
 }
 function loadNotes(bookId: string): Note[] {
   return readJSON<Note[]>(K_NOTES_PREFIX + bookId, [])
@@ -60,6 +69,17 @@ function loadNotes(bookId: string): Note[] {
 function saveNotes(bookId: string, notes: Note[]) {
   Storage.set(K_NOTES_PREFIX + bookId, JSON.stringify(notes))
   __allNotesCache = null
+}
+
+/** 已拉过的书（即使确实没笔记）—— 避免「还有 N 本未加载」永远不降 */
+function loadFetched(): Record<string, 1> {
+  return readJSON<Record<string, 1>>(K_FETCHED, {})
+}
+function markFetched(bookId: string) {
+  const f = loadFetched()
+  if (f[bookId]) return
+  f[bookId] = 1
+  Storage.set(K_FETCHED, JSON.stringify(f))
 }
 
 let __allNotesCache: Note[] | null = null
@@ -71,10 +91,16 @@ function loadAllNotes(): Note[] {
   __allNotesCache = all
   return all
 }
+/** 一本书能真正展示的笔记数（划线 + 想法；bookmarkCount 是页码书签，拉不到内容） */
+function noteTotal(b: NotebookEntry): number {
+  return b.noteCount + b.reviewCount
+}
+
 function uncachedNoteBooks(): NotebookEntry[] {
+  const fetched = loadFetched()
   return loadBooks()
-    .filter((b) => b.noteCount + b.reviewCount + b.bookmarkCount > 0)
-    .filter((b) => loadNotes(b.bookId).length === 0)
+    .filter((b) => noteTotal(b) > 0)
+    .filter((b) => !fetched[b.bookId])
 }
 
 function getApiKey(): string | null {
@@ -93,16 +119,18 @@ function fmtDate(ts: number): string {
 }
 function fmtDur(sec: number): string {
   if (!sec) return "0 分钟"
-  const h = Math.floor(sec / 3600)
-  const m = Math.round((sec % 3600) / 60)
-  return h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`
+  let h = Math.floor(sec / 3600)
+  let m = Math.round((sec % 3600) / 60)
+  if (m >= 60) { h += 1; m = 0 }
+  return h > 0 ? `${h} 小时${m > 0 ? ` ${m} 分钟` : ""}` : `${m} 分钟`
 }
 
 /** 紧凑时长：1234h / 12h30m / 45m，避免几千小时把卡片撑开 */
 function fmtDurShort(sec: number): string {
   if (!sec) return "0m"
-  const h = Math.floor(sec / 3600)
-  const m = Math.round((sec % 3600) / 60)
+  let h = Math.floor(sec / 3600)
+  let m = Math.round((sec % 3600) / 60)
+  if (m >= 60) { h += 1; m = 0 }
   if (h >= 100) return `${h}h`
   if (h > 0) return m > 0 ? `${h}h${m}m` : `${h}h`
   return `${m}m`
@@ -118,14 +146,42 @@ function shuffle<T>(arr: T[]): T[] {
   return a
 }
 function copyText(t: string) {
-  Pasteboard.setString(t).catch(() => undefined)
+  try {
+    Pasteboard.setString(t)
+  } catch {
+    // ignore
+  }
+}
+
+/** 字数：不足 1 万按千字保留一位小数 */
+function fmtWord(w: number): string {
+  if (!w) return ""
+  if (w < 9950) return `${Math.round(w / 100) / 10} 千字`
+  return `${Math.round(w / 10000)} 万字`
+}
+
+/** 毫秒时间戳 → 10-21 19:20 */
+function fmtStamp(ms: number): string {
+  if (!ms) return ""
+  const d = new Date(ms)
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  const hh = String(d.getHours()).padStart(2, "0")
+  const mi = String(d.getMinutes()).padStart(2, "0")
+  return `${mm}-${dd} ${hh}:${mi}`
 }
 
 // ===== 首次使用 / 更新说明 =====
-const __rnVersion = "0.4.10"
+const __rnVersion = "0.5.0"
 const __rnKey = "inkling_release_notes_version"
 const __rnItems = [
-  "修复：重温卡片里的书名行箭头无法点击，现在可进入书籍详情",
+  "新增：书架搜不到的书可直接跳去书城搜索",
+  "新增：我的页展示读过 / 读完本数与阅读天数",
+  "新增：书架显示上次同步时间",
+  "修复：同步失败时会把书架缓存覆盖成只剩有笔记的书",
+  "修复：目录里的热门划线会显示成串数字",
+  "修复：只打分没写字的想法会变成空白卡片",
+  "优化：帖子/搜索结果显示被居中、加载更多会重复插入同一条",
 ]
 
 function ReleaseNotesGate({ children }: { children: any }) {
@@ -369,6 +425,11 @@ function RevisitPage() {
   const [deck, setDeck] = useState<Note[]>(() => shuffle(loadAllNotes()))
   const [idx, setIdx] = useState(0)
   const [loadingNotes, setLoadingNotes] = useState(false)
+  const busyRef = useRef(false)
+  const filterRef = useRef(filter)
+  useEffect(() => {
+    filterRef.current = filter
+  }, [filter])
   const [noteProgress, setNoteProgress] = useState("")
   const [remaining, setRemaining] = useState(0)
 
@@ -384,11 +445,13 @@ function RevisitPage() {
 
   async function loadBatch() {
     const key = getApiKey()
-    if (!key) return
+    if (!key || busyRef.current) return
+    busyRef.current = true
     const missing = uncachedNoteBooks()
     setRemaining(missing.length)
     if (missing.length === 0) {
       setAll(loadAllNotes())
+      busyRef.current = false
       return
     }
     setLoadingNotes(true)
@@ -400,22 +463,32 @@ function RevisitPage() {
       try {
         const r = await Weread.getBookNotes(key, b.bookId)
         saveNotes(b.bookId, r.notes)
+        if (!r.reviewsFailed) markFetched(b.bookId)
       } catch {
         // 单本失败不中断
       }
       if (i % 3 === 0) await new Promise<void>((res) => { setTimeout(() => res(), 1) })
     }
-    setAll(loadAllNotes())
+    const fresh = loadAllNotes()
+    setAll(fresh)
+    // 把新拉到的笔记并进牌堆，但不打断当前正在看的卡片
+    setDeck((prev) => {
+      const ids = new Set(prev.map((n) => n.id))
+      const pool = filterRef.current === "all" ? fresh : fresh.filter((n) => n.kind === filterRef.current)
+      const extra = pool.filter((n) => !ids.has(n.id))
+      return extra.length > 0 ? prev.concat(shuffle(extra)) : prev
+    })
     setLoadingNotes(false)
     setNoteProgress("")
     setRemaining(uncachedNoteBooks().length)
+    busyRef.current = false
   }
 
   useEffect(() => {
     const list = filter === "all" ? all : all.filter((n) => n.kind === filter)
     setDeck(shuffle(list))
     setIdx(0)
-  }, [filter, all])
+  }, [filter])
 
   const current = deck.length > 0 ? deck[Math.min(idx, deck.length - 1)] : null
 
@@ -503,7 +576,9 @@ function RevisitPage() {
                 </Button>
               </HStack>
             </VStack>
-          ) : null}
+          ) : (
+            <Notice icon="line.3.horizontal.decrease.circle" title="没有可翻的内容" message="换一个筛选看看" />
+          )}
         </VStack>
       </ScrollView>
     </PageShell>
@@ -538,7 +613,7 @@ function NoteCard({ note, hero }: { note: Note; hero?: boolean }) {
       ) : null}
 
       <Text font={hero ? 21 : 17} lineSpacing={hero ? 9 : 7} foregroundStyle="label">
-        {note.content}
+        {note.content || note.sourceText || "（这条想法没有正文）"}
       </Text>
 
       {note.chapter ? (
@@ -550,7 +625,7 @@ function NoteCard({ note, hero }: { note: Note; hero?: boolean }) {
       <NavigationLink destination={<BookDetailPage bookId={note.bookId} title={note.bookTitle} author={note.bookAuthor} />}>
         <HStack spacing={10} padding={{ top: 16 }}>
           <Cover bookId={note.bookId} url={note.bookCover} width={26} height={36} radius={3} />
-          <VStack alignment="leading" spacing={1} frame={{ maxWidth: "infinity" }}>
+          <VStack alignment="leading" spacing={1} frame={{ maxWidth: "infinity", alignment: "leading" }}>
             <Text font={13} fontWeight="medium" lineLimit={1} foregroundStyle="label">{note.bookTitle}</Text>
             <Text font={11} foregroundStyle="secondaryLabel" lineLimit={1}>{note.bookAuthor}</Text>
           </VStack>
@@ -568,6 +643,7 @@ function ShelfPage() {
   const [books, setBooks] = useState<NotebookEntry[]>(() => loadBooks())
   const [search, setSearch] = useState("")
   const [syncing, setSyncing] = useState(false)
+  const syncingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [showSearch, setShowSearch] = useState(false)
@@ -579,7 +655,8 @@ function ShelfPage() {
 
   async function sync(full = false) {
     const key = getApiKey()
-    if (!key) return
+    if (!key || syncingRef.current) return
+    syncingRef.current = true
     setSyncing(true)
     setError(null)
     setMsg("正在获取书目…")
@@ -589,6 +666,10 @@ function ShelfPage() {
         Weread.getShelf(key),
         Weread.getAllNotebooks(key),
       ])
+      if (shelf.length === 0 && loadBooks().length > 0) {
+        throw new Error("书架获取失败（返回为空），已保留本地数据")
+      }
+      const prevById = new Map(loadBooks().map((b) => [b.bookId, b]))
       const nbMap = new Map(nbResult.books.map((b) => [b.bookId, b]))
 
       // 以完整书架为底，合并笔记计数；笔记里多出来的书也保留
@@ -602,9 +683,9 @@ function ShelfPage() {
           title: s.title || nb?.title || "",
           author: s.author || nb?.author || "",
           cover: s.cover || nb?.cover || "",
-          reviewCount: nb?.reviewCount || 0,
-          noteCount: nb?.noteCount || 0,
-          bookmarkCount: nb?.bookmarkCount || 0,
+          reviewCount: nb ? nb.reviewCount : prevById.get(s.bookId)?.reviewCount || 0,
+          noteCount: nb ? nb.noteCount : prevById.get(s.bookId)?.noteCount || 0,
+          bookmarkCount: nb ? nb.bookmarkCount : prevById.get(s.bookId)?.bookmarkCount || 0,
           readingProgress: nb?.readingProgress || 0,
           markedStatus: s.finishReading ? 1 : nb?.markedStatus || 0,
           sort: nb && nb.sort ? nb.sort : s.readUpdateTime,
@@ -621,15 +702,16 @@ function ShelfPage() {
       const now = Date.now()
       setLastSync(now)
       Storage.set(K_SYNC, String(now))
-      const withNotes = merged.filter((b) => b.noteCount + b.reviewCount + b.bookmarkCount > 0).length
+      const withNotes = merged.filter((b) => noteTotal(b) > 0).length
       setMsg(`书架 ${merged.length} 本 · 有笔记 ${withNotes} 本`)
       if (full) {
         // 后台预下载（不阻塞界面）
-        preload(merged.filter((b) => b.noteCount + b.reviewCount + b.bookmarkCount > 0).slice(0, 40))
+        preload(merged.filter((b) => noteTotal(b) > 0).slice(0, 40))
       }
     } catch (e: any) {
       setError(e?.message || "同步失败")
     } finally {
+      syncingRef.current = false
       setSyncing(false)
     }
   }
@@ -641,9 +723,10 @@ function ShelfPage() {
     for (const b of list) {
       i++
       try {
-        if (loadNotes(b.bookId).length === 0) {
+        if (loadNotes(b.bookId).length === 0 && !loadFetched()[b.bookId]) {
           const r = await Weread.getBookNotes(key, b.bookId)
           saveNotes(b.bookId, r.notes)
+          if (!r.reviewsFailed) markFetched(b.bookId)
         }
       } catch {
         // 单本失败不中断
@@ -656,16 +739,17 @@ function ShelfPage() {
     setMsg(`笔记缓存完成（最近 ${list.length} 本）`)
   }
 
-  const hasN = (b: NotebookEntry) => b.noteCount + b.reviewCount + b.bookmarkCount > 0
+  const hasN = (b: NotebookEntry) => noteTotal(b) > 0
   const withNotesCount = books.filter(hasN).length
   const filtered = books
     .filter((b) => (onlyNotes ? hasN(b) : true))
-    .filter((b) => (search ? b.title.includes(search) || b.author.includes(search) : true))
-  const totalNotes = books.reduce((s, b) => s + b.noteCount + b.reviewCount + b.bookmarkCount, 0)
+    .filter((b) => {
+      const q = search.trim().toLowerCase()
+      if (!q) return true
+      return b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q)
+    })
+  const totalNotes = books.reduce((s, b) => s + noteTotal(b), 0)
 
-  const columns = [
-    { size: { type: "adaptive" as const, min: 96, max: 132 } },
-  ]
 
   return (
     <PageShell>
@@ -688,13 +772,14 @@ function ShelfPage() {
               ? {
                   isPresented: true,
                   onChanged: (v: boolean) => setShowSearch(v),
-                  content: <SearchPage onClose={() => setShowSearch(false)} />,
+                  content: <SearchPage initialKeyword={search} onClose={() => setShowSearch(false)} />,
                 }
               : undefined
           }
         >
           <Text font={13} foregroundStyle="secondaryLabel" padding={{ horizontal: 20, top: 4, bottom: 10 }}>
             {books.length} 本 · 有笔记 {withNotesCount} 本 · {totalNotes} 条
+            {lastSync > 0 ? ` · 上次同步 ${fmtStamp(lastSync)}` : ""}
           </Text>
 
           <HStack spacing={8} padding={{ horizontal: 20, bottom: 12 }}>
@@ -716,6 +801,15 @@ function ShelfPage() {
             <Text font={12} foregroundStyle="secondaryLabel" padding={{ horizontal: 20, top: 8 }}>{msg}</Text>
           ) : null}
 
+          {books.length > 0 && !onlyNotes && filtered.length === 0 && search.trim().length > 0 ? (
+            <Notice
+              icon="magnifyingglass"
+              title="书架里没有"
+              message={`“${search.trim()}”不在你的书架上，试试在书城搜`}
+              action={<PrimaryButton title="在书城搜索" icon="text.magnifyingglass" onTap={() => setShowSearch(true)} />}
+            />
+          ) : null}
+
           {books.length === 0 && !syncing ? (
             <Notice
               icon="books.vertical"
@@ -725,14 +819,14 @@ function ShelfPage() {
             />
           ) : (
             <VStack padding={{ horizontal: 16 }}>
-              <LazyVGrid columns={columns} spacing={18} alignment="center">
+              <LazyVGrid columns={GRID_COLUMNS} spacing={18} alignment="center">
               {filtered.map((b) => {
-                const total = b.noteCount + b.reviewCount + b.bookmarkCount
+                const total = noteTotal(b)
                 return (
                   <NavigationLink key={b.bookId} destination={<BookDetailPage bookId={b.bookId} title={b.title} author={b.author} />}>
                     <VStack alignment="leading" spacing={6}>
                       <Cover bookId={b.bookId} url={b.cover} width={96} height={136} radius={6} />
-                      <Text font={13} fontWeight="medium" lineLimit={2} foregroundStyle="label" frame={{ width: 96 }}>{b.title}</Text>
+                      <Text font={13} fontWeight="medium" lineLimit={2} foregroundStyle="label" multilineTextAlignment="leading" frame={{ width: 96 }}>{b.title || "未命名"}</Text>
                       <Text font={11} foregroundStyle={total > 0 ? "tertiaryLabel" : "quaternaryLabel"}>
                         {total > 0 ? `${total} 条` : "无笔记"}
                       </Text>
@@ -783,6 +877,7 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
         try {
           const r = await Weread.getBookNotes(key, bookId)
           saveNotes(bookId, r.notes)
+          if (!r.reviewsFailed) markFetched(bookId)
           if (alive) setNotes(r.notes)
         } catch (e: any) {
           if (alive) setError(e?.message || "加载失败")
@@ -829,6 +924,8 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
 
   const hCount = notes.filter((n) => n.kind === "highlight").length
   const rCount = notes.filter((n) => n.kind === "review").length
+  const shownTitle = title || (info && info.title) || "未命名"
+  const shownAuthor = author || (info && info.author) || ""
   const shown = filter === "all" ? notes : notes.filter((n) => n.kind === filter)
   const intro = (info && info.intro ? info.intro : "").trim()
   const chapterNames: Record<number, string> = {}
@@ -872,9 +969,9 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
         >
           <HStack spacing={14} padding={{ horizontal: 20, top: 10, bottom: 18 }}>
             <Cover bookId={bookId} width={78} height={110} radius={8} />
-            <VStack alignment="leading" spacing={4} frame={{ maxWidth: "infinity" }}>
-              <Text font={19} fontWeight="bold" lineLimit={3}>{title}</Text>
-              <Text font={13} foregroundStyle="secondaryLabel">{author}</Text>
+            <VStack alignment="leading" spacing={4} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+              <Text font={19} fontWeight="bold" lineLimit={3}>{shownTitle}</Text>
+              <Text font={13} foregroundStyle="secondaryLabel">{shownAuthor}</Text>
               <HStack spacing={10} padding={{ top: 4 }}>
                 <Text font={12} foregroundStyle={ACCENT}>{hCount} 划线</Text>
                 <Text font={12} foregroundStyle="systemOrange">{rCount} 想法</Text>
@@ -900,8 +997,8 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
                   ) : null}
                   {info.wordCount > 0 ? (
                     <VStack alignment="leading" spacing={1}>
-                      <Text font={17} fontWeight="bold">{Math.round(info.wordCount / 10000)}</Text>
-                      <Text font={10} foregroundStyle="tertiaryLabel">万字</Text>
+                      <Text font={17} fontWeight="bold">{fmtWord(info.wordCount)}</Text>
+                      <Text font={10} foregroundStyle="tertiaryLabel">篇幅</Text>
                     </VStack>
                   ) : null}
                   {info.newRatingCount > 0 ? (
@@ -922,7 +1019,7 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
                     <Text font={12} foregroundStyle={ACCENT}>{showIntro ? "收起" : "展开简介"}</Text>
                   </Button>
                 ) : null}
-                <NavigationLink destination={<ReviewsPage bookId={bookId} title={title} />}>
+                <NavigationLink destination={<ReviewsPage bookId={bookId} title={shownTitle} />}>
                   <HStack spacing={4} padding={{ top: 2 }}>
                     <Image systemName="text.bubble" font={12} foregroundStyle={ACCENT} />
                     <Text font={12} foregroundStyle={ACCENT}>看读者点评</Text>
@@ -956,6 +1053,26 @@ function BookDetailPage({ bookId, title, author }: { bookId: string; title: stri
                   </HStack>
                 )}
               </VStack>
+            </VStack>
+          ) : null}
+
+          {!info ? (
+            <VStack padding={{ horizontal: 16, bottom: 16 }}>
+              <HStack spacing={20} padding={14} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 18 }}>
+                <Button action={() => setShowChapters(true)}>
+                  <HStack spacing={4}>
+                    <Image systemName="list.bullet" font={12} foregroundStyle={ACCENT} />
+                    <Text font={13} foregroundStyle={ACCENT}>目录</Text>
+                  </HStack>
+                </Button>
+                <NavigationLink destination={<ReviewsPage bookId={bookId} title={shownTitle} />}>
+                  <HStack spacing={4}>
+                    <Image systemName="text.bubble" font={12} foregroundStyle={ACCENT} />
+                    <Text font={13} foregroundStyle={ACCENT}>读者点评</Text>
+                  </HStack>
+                </NavigationLink>
+                <Spacer />
+              </HStack>
             </VStack>
           ) : null}
 
@@ -1029,7 +1146,7 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
     const books = loadBooks()
     return {
       books: books.length,
-      notes: books.reduce((s, b) => s + b.noteCount + b.reviewCount + b.bookmarkCount, 0),
+      notes: books.reduce((s, b) => s + noteTotal(b), 0),
     }
   })
   const [showRecommend, setShowRecommend] = useState(false)
@@ -1040,6 +1157,11 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
   }, [mode])
 
   async function loadStats() {
+    const books = loadBooks()
+    setCounts({
+      books: books.length,
+      notes: books.reduce((s, b) => s + noteTotal(b), 0),
+    })
     const k = getApiKey()
     if (!k) return
     try {
@@ -1050,6 +1172,7 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
   }
 
   async function save() {
+    if (busy) return
     const input = await Dialog.prompt({
       title: "更换 API Key",
       message: "粘贴从微信读书获取的 wrk- 开头的 Key",
@@ -1075,6 +1198,7 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
   function clearCache() {
     for (const b of loadBooks()) Storage.remove(K_NOTES_PREFIX + b.bookId)
     Storage.remove(K_BOOKS)
+    Storage.remove(K_FETCHED)
     Storage.remove(K_SYNC)
     __allNotesCache = null
     setCounts({ books: 0, notes: 0 })
@@ -1125,7 +1249,7 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
 
           <HStack spacing={10}>
             {statItems.map((s) => (
-              <VStack key={s.label} alignment="leading" spacing={3} padding={14} frame={{ maxWidth: "infinity" }} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 16 }}>
+              <VStack key={s.label} alignment="leading" spacing={3} padding={14} frame={{ maxWidth: "infinity", alignment: "leading" }} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 16 }}>
                 <Text font={11} foregroundStyle="secondaryLabel">{s.label}</Text>
                 <HStack spacing={2} alignment="firstTextBaseline">
                   <Text font={16} fontWeight="bold" lineLimit={1}>{s.value}</Text>
@@ -1134,6 +1258,13 @@ function ProfilePage({ onLogout, dismiss }: { onLogout: () => void; dismiss: () 
               </VStack>
             ))}
           </HStack>
+
+          {mode === "overall" && stats ? (
+            <Text font={11} foregroundStyle="tertiaryLabel" padding={{ top: -6 }}>
+              读过 {stats.booksRead} 本 · 读完 {stats.booksFinished} 本 · 阅读 {stats.readDays} 天
+              {stats.preferWord ? ` · ${stats.preferWord}` : ""}
+            </Text>
+          ) : null}
 
           <VStack alignment="leading" spacing={12} padding={16} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 18 }}>
             <HStack spacing={8}>
@@ -1235,10 +1366,9 @@ function HotSection({
           alignment="leading"
           spacing={5}
           padding={{ vertical: 12 }}
-          frame={{ maxWidth: "infinity" }}
-          onTapGesture={() => onOpen(b)}
+          frame={{ maxWidth: "infinity", alignment: "leading" }}
         >
-          <HStack alignment="top" spacing={8} frame={{ maxWidth: "infinity" }}>
+          <HStack alignment="top" spacing={8} frame={{ maxWidth: "infinity" }} onTapGesture={() => onOpen(b)}>
             <Text font={12} fontWeight="medium" foregroundStyle={i === 0 ? "systemOrange" : "tertiaryLabel"} frame={{ width: 16 }} lineLimit={1}>
               {i + 1}
             </Text>
@@ -1321,12 +1451,19 @@ function ReviewsPage({ bookId, title }: { bookId: string; title: string }) {
 
   async function loadMore() {
     const key = getApiKey()
-    if (!key || items.length === 0) return
+    if (!key || items.length === 0 || loading) return
     const lastIdx = items[items.length - 1].idx
+    if (!lastIdx) {
+      setMore(false)
+      return
+    }
     setLoading(true)
     try {
       const r = await Weread.getPublicReviews(key, bookId, type, lastIdx)
-      setItems((prev) => prev.concat(r.items))
+      setItems((prev) => {
+        const seen = new Set(prev.map((x) => x.reviewId || x.idx))
+        return prev.concat(r.items.filter((x) => !seen.has(x.reviewId || x.idx)))
+      })
       setMore(r.hasMore)
     } catch {
       // ignore
@@ -1371,7 +1508,7 @@ function ReviewsPage({ bookId, title }: { bookId: string; title: string }) {
             <LazyVStack alignment="leading" spacing={12}>
               {items.map((r) => (
                 <VStack key={r.reviewId || r.idx} alignment="leading" spacing={8} padding={{ horizontal: 16 }}>
-                  <VStack alignment="leading" spacing={8} padding={16} frame={{ maxWidth: "infinity" }} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 18 }}>
+                  <VStack alignment="leading" spacing={8} padding={16} frame={{ maxWidth: "infinity", alignment: "leading" }} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 18 }}>
                     <HStack spacing={8}>
                       <Text font={12} fontWeight="semibold">{r.authorName}</Text>
                       <Stars n={r.star} />
@@ -1412,19 +1549,25 @@ function ReviewsPage({ bookId, title }: { bookId: string; title: string }) {
 
 // ===== 搜索 =====
 
-function SearchPage({ onClose }: { onClose: () => void }) {
-  const [kw, setKw] = useState("")
+function SearchPage({ onClose, initialKeyword }: { onClose: () => void; initialKeyword?: string }) {
+  const [kw, setKw] = useState(initialKeyword || "")
   const [scope, setScope] = useState<10 | 12>(10)
   const [items, setItems] = useState<Weread.SearchItem[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [searched, setSearched] = useState(false)
+  const lastQuery = useState<{ v: string }>(() => ({ v: "" }))[0]
+
+  useEffect(() => {
+    if ((initialKeyword || "").trim()) void run()
+  }, [])
 
   async function run() {
     const q = kw.trim()
     if (!q) return
     const key = getApiKey()
     if (!key) return
+    lastQuery.v = q
     setLoading(true)
     setErr(null)
     setSearched(true)
@@ -1446,7 +1589,7 @@ function SearchPage({ onClose }: { onClose: () => void }) {
             <VStack padding={{ horizontal: 20, top: 10, bottom: 12 }}>
               <HStack spacing={8} padding={{ horizontal: 12, vertical: 10 }} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 12 }} frame={{ maxWidth: "infinity" }}>
                 <Image systemName="magnifyingglass" font={15} foregroundStyle="tertiaryLabel" />
-                <TextField title="关键词" prompt={scope === 10 ? "搜书名或作者" : "搜书里的句子"} value={kw} onChanged={setKw} onBlur={run} frame={{ maxWidth: "infinity" }} />
+                <TextField title="关键词" prompt={scope === 10 ? "搜书名或作者" : "搜书里的句子"} value={kw} onChanged={setKw} onBlur={() => { if (kw.trim() && kw.trim() !== lastQuery.v) void run() }} frame={{ maxWidth: "infinity" }} />
                 <Button action={run}>
                   <Text font={13} fontWeight="semibold" foregroundStyle={ACCENT}>搜索</Text>
                 </Button>
@@ -1475,7 +1618,7 @@ function SearchPage({ onClose }: { onClose: () => void }) {
                   <NavigationLink key={it.bookId} destination={<BookDetailPage bookId={it.bookId} title={it.title} author={it.author} />}>
                     <HStack spacing={12} padding={{ horizontal: 16, vertical: 6 }}>
                       <Cover bookId={it.bookId} url={it.cover} width={44} height={62} radius={5} />
-                      <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
+                      <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity", alignment: "leading" }}>
                         <Text font={14} fontWeight="medium" lineLimit={1} foregroundStyle="label">{it.title}</Text>
                         <Text font={12} foregroundStyle="secondaryLabel" lineLimit={1}>{it.author}</Text>
                         <HStack spacing={8}>
@@ -1593,7 +1736,7 @@ function ChapterSheet({ bookId, notes, onClose }: { bookId: string; notes: Note[
                         heat.map((u, i) => (
                           <HStack key={u.range + i} spacing={8}>
                             <Text font={11} foregroundStyle="tertiaryLabel" frame={{ width: 22 }}>{i + 1}</Text>
-                            <Text font={11} foregroundStyle="secondaryLabel">{u.range}</Text>
+                            <Text font={11} foregroundStyle="secondaryLabel">第 {i + 1} 处划得最多</Text>
                             <Spacer />
                             <Text font={11} foregroundStyle="systemOrange">{u.count} 人</Text>
                             <Button action={() => Safari.openURL(Weread.highlightLink(bookId, c.chapterUid, u.range))}>
@@ -1674,7 +1817,6 @@ function HotThoughtsSheet({
         <VStack alignment="leading" spacing={14} padding={{ horizontal: 18, bottom: 28 }}>
           <VStack alignment="leading" spacing={6} padding={14} background={CARD_BG} clipShape={{ type: "rect", cornerRadius: 14 }}>
             <Text font={14} lineSpacing={6} foregroundStyle="label">{markText}</Text>
-            <Text font={11} foregroundStyle="tertiaryLabel">位置 {range}</Text>
           </VStack>
 
           {detail ? (
@@ -1761,7 +1903,7 @@ function RecommendPage({ onClose }: { onClose: () => void }) {
                 <NavigationLink key={b.bookId} destination={<BookDetailPage bookId={b.bookId} title={b.title} author={b.author} />}>
                   <HStack spacing={12} padding={{ vertical: 4 }}>
                     <Cover bookId={b.bookId} url={b.cover} width={54} height={76} radius={5} />
-                    <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
+                    <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity", alignment: "leading" }}>
                       <Text font={14} fontWeight="medium" lineLimit={1} foregroundStyle="label">{b.title}</Text>
                       <Text font={12} foregroundStyle="secondaryLabel" lineLimit={1}>{b.author}</Text>
                       {b.reason ? <Text font={11} foregroundStyle="tertiaryLabel" lineLimit={2}>{b.reason}</Text> : null}
@@ -1864,8 +2006,6 @@ function ApiDiagPage({ onClose }: { onClose: () => void }) {
     </NavigationStack>
   )
 }
-
-export default App
 
 // ===== 入口 =====
 async function run() {

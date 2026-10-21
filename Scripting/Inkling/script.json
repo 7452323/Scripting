@@ -1,0 +1,28 @@
+{
+  "intentInputTypes": [],
+  "localizedDescriptions": {
+    "zh": "Inkling - 微信读书划线回顾。卡片式重温、封面墙书架、大家都在划、阅读统计，支持跳回微信读书原文。",
+    "en": "Inkling - WeRead Highlights Review. Revisit as cards, browse by cover, see popular highlights and reading stats, jump back to WeRead."
+  },
+  "name": "Inkling",
+  "color": "rgba(88, 86, 214, 1)",
+  "localizedNames": {
+    "zh": "Inkling",
+    "en": "Inkling"
+  },
+  "icon": "text.quote",
+  "iconImage": null,
+  "runInApp": false,
+  "description": "Inkling - 微信读书划线回顾。全屏呈现，左上角可关闭。覆盖官方 Skill 全部只读接口：书架/笔记/划线/想法/热门划线/划线想法/公开点评/目录与热度/阅读进度/周月年统计/搜索/推荐/相似书。",
+  "contributors": [],
+  "remoteResource": null,
+  "author": {
+    "email": "7452323@gmail.com",
+    "homepage": "https://github.com/7452323",
+    "name": "7452323"
+  },
+  "version": "0.4.10",
+  "permissions": null,
+  "entry": "index.tsx",
+  "widget": null
+}

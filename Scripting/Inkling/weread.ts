@@ -122,6 +122,7 @@ export interface BookNotes {
   bookTitle: string
   bookAuthor: string
   bookCover: string
+  reviewsFailed: boolean
 }
 
 export interface ReadStats {
@@ -129,6 +130,8 @@ export interface ReadStats {
   totalReadTime: number
   booksFinished: number
   booksRead: number
+  noteCount: number
+  preferWord: string
 }
 
 export interface BestBookmark {
@@ -158,7 +161,12 @@ async function callAPI(api_name: string, params: Record<string, unknown> = {}, a
     body: JSON.stringify(body),
   })
   // @ts-ignore
-  const data = await resp.json()
+  let data: any = null
+  try {
+    data = await resp.json()
+  } catch {
+    throw new Error(`网关返回异常（HTTP ${resp.status}）`)
+  }
   // 网关要求升级
   if (data && data.upgrade_info) {
     throw new Error("微信读书 Skill 需要升级，请更新脚本")
@@ -308,24 +316,32 @@ export async function getAllReviews(apiKey: string, bookId: string): Promise<Wer
 
 /** 获取一本书的完整笔记（划线 + 想法），汇总为统一 Note 模型 */
 export async function getBookNotes(apiKey: string, bookId: string): Promise<BookNotes> {
-  const [bookmarkResp, reviewResp] = await Promise.all([
+  const [bookmarkResp, reviewResp] = await Promise.allSettled([
     getBookmarklist(apiKey, bookId),
     getAllReviews(apiKey, bookId),
   ])
 
-  const rawBook: any = bookmarkResp.book || {}
+  const bm = bookmarkResp.status === "fulfilled" ? bookmarkResp.value : null
+  if (!bm) {
+    const reason = bookmarkResp.status === "rejected" ? (bookmarkResp.reason as any) : null
+    throw new Error(reason?.message || "划线加载失败")
+  }
+  const reviews = reviewResp.status === "fulfilled" ? reviewResp.value : []
+  const reviewsFailed = reviewResp.status === "rejected"
+
+  const rawBook: any = bm.book || {}
   const book: any = rawBook.book || rawBook
   const bookTitle = book.title || ""
   const bookAuthor = book.author || ""
   const bookCover = book.cover || getCoverUrl(bookId)
 
   const chapterMap = new Map<number, string>()
-  for (const c of bookmarkResp.chapters) chapterMap.set(c.chapterUid, c.title)
+  for (const c of bm.chapters) chapterMap.set(c.chapterUid, c.title)
 
   const notes: Note[] = []
 
   // 划线
-  for (const h of bookmarkResp.updated) {
+  for (const h of bm.updated) {
     notes.push({
       id: `${h.bookmarkId}`,
       kind: "highlight",
@@ -345,7 +361,11 @@ export async function getBookNotes(apiKey: string, bookId: string): Promise<Book
   }
 
   // 想法
-  for (const r of reviewResp) {
+  for (const r of reviews) {
+    const body = (r.content || "").trim()
+    const quote = (r.abstract || "").trim()
+    // type 4 的纯评分（只打星没写字）会以空 content 返回，别当想法展示
+    if (!body && !quote) continue
     notes.push({
       id: `${r.reviewId}`,
       kind: "review",
@@ -366,26 +386,29 @@ export async function getBookNotes(apiKey: string, bookId: string): Promise<Book
 
   notes.sort((a, b) => b.createTime - a.createTime)
 
-  return { notes, bookTitle, bookAuthor, bookCover }
+  return { notes, bookTitle, bookAuthor, bookCover, reviewsFailed }
 }
 
-/** 阅读统计 */
-export async function getReadStats(apiKey: string): Promise<ReadStats> {
-  return getReadStatsByMode(apiKey, "overall")
-}
-
-/** 按周期取阅读统计（weekly / monthly / annually / overall） */
-export async function getReadStatsByMode(apiKey: string, mode: ReadMode): Promise<ReadStats> {
+/** 阅读统计（readStat 里才是「读过 / 读完 / 笔记」的真实数字） */
+export async function getReadStatsByMode(apiKey: string, mode: ReadMode): Promise<ReadStats | null> {
   try {
     const data = await callAPI("/readdata/detail", { mode }, apiKey)
+    const statMap: Record<string, number> = {}
+    for (const it of data.readStat || []) {
+      if (!it || typeof it.stat !== "string") continue
+      const n = Number(String(it.counts || "").replace(/[^0-9]/g, ""))
+      if (!Number.isNaN(n)) statMap[it.stat] = n
+    }
     return {
-      readDays: data.readDays || 0,
+      readDays: data.readDays || statMap["阅读"] || 0,
       totalReadTime: data.totalReadTime || 0,
-      booksFinished: data.booksFinished || 0,
-      booksRead: data.booksRead || 0,
+      booksFinished: statMap["读完"] || 0,
+      booksRead: statMap["读过"] || 0,
+      noteCount: statMap["笔记"] || 0,
+      preferWord: data.preferCategoryWord || data.preferTimeWord || "",
     }
   } catch {
-    return { readDays: 0, totalReadTime: 0, booksFinished: 0, booksRead: 0 }
+    return null
   }
 }
 
@@ -728,7 +751,7 @@ export async function getSimilar(
     const d = await callAPI("/book/similar", params, apiKey)
     const list = (d.booksimilar && d.booksimilar.books) || []
     return list.map((s: any) => {
-      const bi = (s.book && s.book.bookInfo) || {}
+      const bi = (s.book && s.book.bookInfo) || s.bookInfo || s.book || {}
       return {
         bookId: bi.bookId || "",
         title: bi.title || "",
@@ -757,26 +780,22 @@ export interface ShelfBook {
   finishReading: number
 }
 
-/** 完整书架（含没有笔记的书） */
+/** 完整书架（含没有笔记的书）。失败时抛出，避免把“空书架”当成真结果写进缓存 */
 export async function getShelf(apiKey: string): Promise<ShelfBook[]> {
-  try {
-    const d = await callAPI("/shelf/sync", {}, apiKey)
-    const out: ShelfBook[] = []
-    for (const b of d.books || []) {
-      if (!b || !b.bookId) continue
-      out.push({
-        bookId: b.bookId,
-        title: b.title || "",
-        author: b.author || "",
-        cover: b.cover || "",
-        readUpdateTime: b.readUpdateTime || 0,
-        finishReading: b.finishReading || 0,
-      })
-    }
-    return out
-  } catch {
-    return []
+  const d = await callAPI("/shelf/sync", {}, apiKey)
+  const out: ShelfBook[] = []
+  for (const b of d.books || []) {
+    if (!b || !b.bookId) continue
+    out.push({
+      bookId: b.bookId,
+      title: b.title || "",
+      author: b.author || "",
+      cover: b.cover || "",
+      readUpdateTime: b.readUpdateTime || 0,
+      finishReading: b.finishReading || 0,
+    })
   }
+  return out
 }
 
 /** 校验 API Key 是否可用（拉一次书架即可） */

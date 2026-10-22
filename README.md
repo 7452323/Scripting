@@ -33,7 +33,7 @@
 
 | 项目 | 用途 |
 | :--- | :--- |
-| [MoonTVPlua](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FMoonTVPlua%22%5D) | 媒体浏览、搜索、资料库与播放。 |
+| [MoonTVPlua](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FMoonTVPlua%22%5D) | 服务器干别的了，显示挂了很正常。 |
 | [Iwara](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2FIwara%22%5D) | 视频浏览、筛选、收藏、画质选择、后台下载和相册保存。 |
 | [视频解析下载](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E8%A7%86%E9%A2%91%E8%A7%A3%E6%9E%90%E4%B8%8B%E8%BD%BD%22%5D) | 解析并下载抖音、Twitter/X、小红书、Instagram 和 Bilibili 媒体。 |
 | [镜花水月](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2F7452323%2FScripting%2Ftree%2Fmain%2FScripting%2F%E9%95%9C%E8%8A%B1%E6%B0%B4%E6%9C%88%22%5D) | 抖音作品浏览、收藏、历史、无水印解析、下载、保存和分享。 |

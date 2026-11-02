@@ -1,15 +1,21 @@
 /**
- * 抖音网页端签名：`a_bogus`（2026-10 现行算法）
+ * 抖音网页端签名：`a_bogus`（2026-11 与前端 JS 逐字节对齐）
  *
- * 来源：z-mio/ParseHub `src/parsehub/provider_api/douyin.py` 的 ABogus 类（纯 Python 移植），
- *       此处按 1:1 行为移植为纯 TypeScript（不依赖任何 Scripting API，可直接被 JS 环境复用）。
+ * 来源：`7452323/douyin-sign` 的 `sign/abogus.py`（已用 NearHuiwen/TiktokDouyinCrawler 的
+ *       `utils/a_bogus.js` 交叉验证，4 条 golden 逐字节相同）。此处 1:1 移植为纯 TypeScript，
+ *       不依赖任何 Scripting API。
+ *
+ * 相比旧版（ParseHub 的 ABogus 移植）修正了三处真缺陷：
+ *   1. 参数串哈希**不能**再 URL 编码一次（前端传的是已编码的 location.search）；
+ *   2. UA 那一路必须**按实际 UA 动态算**（旧版硬编码 32 字节常量，换个 UA 就全错）；
+ *   3. 变体 base64 尾组只吐 2~3 个字符、末尾固定补 1 个 `=`（旧版补足 4 个、且不补 `=`）。
  *
  * 用法：
- *   const params = { device_platform: "webapp", aid: "6383", ... }   // 注意：顺序敏感
- *   const query = new URLSearchParams(params) ... → 交给 signWebQuery 之类拼接
- *   const aBogus = abogus(params)
+ *   const params = { device_platform: "webapp", aid: "6383", ... }   // 顺序敏感
+ *   const aBogus = abogus(params, "GET", { ua: DESKTOP_UA })
  *
- * ⚠️ 签名对象是「除 a_bogus / uifid / timestamp 之外的那批参数」，且**参数顺序必须与最终发送一致**。
+ * ⚠️ 签名对象是「除 a_bogus / uifid / timestamp 之外的那批参数」，参数顺序必须与最终发送一致；
+ *    `ua` 必须与请求头里真正发出去的 User-Agent 完全相同，否则 UA 那一路的哈希就对不上。
  */
 
 /* ────────────────────────── SM3（GB/T 32905-2016） ────────────────────────── */
@@ -27,7 +33,7 @@ function ff(j: number, x: number, y: number, z: number): number {
   return j < 16 ? (x ^ y ^ z) >>> 0 : ((x & y) | (x & z) | (y & z)) >>> 0
 }
 function gg(j: number, x: number, y: number, z: number): number {
-  return j < 16 ? (x ^ y ^ z) >>> 0 : ((x & y) | (~x & z)) >>> 0
+  return j < 16 ? (x ^ y ^ z) >>> 0 : (((x & y) | (~x & z))) >>> 0
 }
 
 /** SM3 摘要（返回 32 字节） */
@@ -115,159 +121,198 @@ export function sm3Hex(s: string): string {
 
 /* ────────────────────────── ABogus ────────────────────────── */
 
-const BASE64_ALPHABETS: Record<string, string> = {
-  s0: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
-  s1: "Dkdpgh4ZKsQB80/Mfvw36XI1R25+WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
-  s2: "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
-  s3: "ckdp1h4ZKsUB80/Mfvw36XIgR25+WQAlEi7NLboqYTOPuzmFjJnryx9HVGDaStCe",
-  s4: "Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe",
-}
+/** 变体 base64 表（s3 = UA 那一路，s4 = 最终输出；与仓库 Python 版逐字符相同） */
+const SHIFT_S3 = "ckdp1h4ZKsUB80/Mfvw36XIgR25+WQAlEi7NLboqYTOPuzmFjJnryx9HVGDaStCe"
+const SHIFT_S4 = "Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe"
 
-const UA_CODE = [
-  76, 98, 15, 131, 97, 245, 224, 133, 122, 199, 241, 166, 79, 34, 90, 191,
-  128, 126, 122, 98, 66, 11, 14, 40, 49, 110, 110, 173, 67, 96, 138, 252,
-]
+/** 前端 window_env 默认串（与 sign/abogus.py 默认一致；golden 向量就是用这个算的） */
+export const DEFAULT_WINDOW_ENV = "1536|747|1536|834|0|30|0|0|1536|834|1536|864|1525|747|24|24|Win32"
 
-const DEFAULT_BROWSER = "1536|742|1536|864|0|0|0|0|1536|864|1536|864|1536|742|24|24|MacIntel"
-const END_STRING = "cus"
-const ARGUMENTS = [0, 1, 14]
+/** 兜底 UA：实际调用**必须**传与请求头完全一致的那个 */
+export const DEFAULT_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+
+const SUFFIX = "cus"
+const ARGUMENTS: number[] = [0, 1, 14]
+const AB_AID = 6383
+const AB_PAGE_ID = 6241
 
 function charCodes(s: string): number[] { return Array.from(s).map((c) => c.charCodeAt(0)) }
 function fromCharCode(arr: number[]): string { return String.fromCharCode(...arr) }
 
-/** random_list：把随机数摊成 4 个字节（与 Python 版逐行对应） */
-function randomList(rnd: number, a = 170, b = 85, d = 0, e = 0, f = 0, g = 0): number[] {
-  const r = rnd || Math.random() * 10000
-  const v = [r, Math.trunc(r) & 255, Math.trunc(r) >> 8]
-  v.push((v[1] & a) | d)
-  v.push((v[1] & b) | e)
-  v.push((v[2] & a) | f)
-  v.push((v[2] & b) | g)
-  return v.slice(v.length - 4)
-}
-const list1 = (r?: number) => randomList(r ?? 0, 170, 85, 1, 2, 5, 45 & 170)
-const list2 = (r?: number) => randomList(r ?? 0, 170, 85, 1, 0, 0, 0)
-const list3 = (r?: number) => randomList(r ?? 0, 170, 85, 1, 0, 5, 0)
-
-function generateString1(r1 = 0, r2 = 0, r3 = 0): string {
-  return fromCharCode(list1(r1)) + fromCharCode(list2(r2)) + fromCharCode(list3(r3))
+function latin1Bytes(s: string): Uint8Array {
+  const out = new Uint8Array(s.length)
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 255
+  return out
 }
 
-/** list_4：固定骨架 + 17 个填充位（顺序与 Python 参数一一对应） */
-function list4(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number,
-  i: number, j: number, k: number, m: number, n: number, o: number, p: number, q: number, r: number): number[] {
-  return [
-    44, a, 0, 0, 0, 0, 24, b, n, 0, c, d, 0, 0, 0, 1, 0, 239, e, o, f, g,
-    0, 0, 0, 0, h, 0, 0, 14, i, j, 0, k, m, 3, p, 1, q, 1, r, 0, 0, 0,
-  ]
+/** 取任意精度整数第 shift 个字节（不能用 `>>`：JS 位运算会先截成 int32） */
+function byteAt(n: number, shift: number): number {
+  return Math.floor(n / Math.pow(2, shift)) % 256
 }
 
-function endCheckNum(a: number[]): number {
-  let r = 0
-  for (const i of a) r ^= i
-  return r
-}
-
-function rc4Encrypt(plaintext: string, key: string): string {
+function rc4Bytes(key: number[], data: number[]): number[] {
   const s = Array.from({ length: 256 }, (_, i) => i)
   let j = 0
   for (let i = 0; i < 256; i++) {
-    j = (j + s[i] + key.charCodeAt(i % key.length)) % 256
+    j = (j + s[i] + key[i % key.length]) % 256
     const t = s[i]; s[i] = s[j]; s[j] = t
   }
   let i = 0; j = 0
-  const out: string[] = []
-  for (let k = 0; k < plaintext.length; k++) {
+  const out: number[] = []
+  for (const b of data) {
     i = (i + 1) % 256
     j = (j + s[i]) % 256
     const t = s[i]; s[i] = s[j]; s[j] = t
-    out.push(String.fromCharCode(s[(s[i] + s[j]) % 256] ^ plaintext.charCodeAt(k)))
+    out.push(b ^ s[(s[i] + s[j]) % 256])
   }
-  return out.join("")
+  return out
 }
 
-/** 标准 s4 自定义 base64（generate_result） */
-function generateResult(s: string, alphabetKey = "s4"): string {
-  const alpha = BASE64_ALPHABETS[alphabetKey]
-  const r: string[] = []
-  for (let i = 0; i < s.length; i += 3) {
-    let n: number
-    if (i + 2 < s.length) n = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8) | s.charCodeAt(i + 2)
-    else if (i + 1 < s.length) n = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8)
-    else n = s.charCodeAt(i) << 16
-    const shifts = [18, 12, 6, 0]
-    const masks = [0xfc0000, 0x03f000, 0x0fc0, 0x3f]
-    for (let idx = 0; idx < 4; idx++) {
-      const shift = shifts[idx]
-      if (shift === 6 && i + 1 >= s.length) break
-      if (shift === 0 && i + 2 >= s.length) break
-      r.push(alpha[(n & masks[idx]) >>> shift])
-    }
+/**
+ * 变体 base64：**不补 `=`**，字符数 = ceil(len*4/3)
+ * （前端 `result_encrypt` 循环到 `len/3*4`，尾组不足 3 字节时只吐 2~3 个字符）
+ */
+function rawEncode(s: string, table: string): string {
+  const codes = charCodes(s)
+  const total = Math.ceil((codes.length * 4) / 3)
+  const out: string[] = []
+  for (let i = 0; i < codes.length; i += 3) {
+    const has2 = i + 1 < codes.length
+    const has3 = i + 2 < codes.length
+    let n = codes[i] << 16
+    if (has2) n |= codes[i + 1] << 8
+    if (has3) n |= codes[i + 2]
+    out.push(table[(n >>> 18) & 63])
+    if (has2) out.push(table[(n >>> 12) & 63])
+    // 尾组还剩 2 字节时前端仍会吐第 3 个字符（第 4 个才需要 3 字节），多出的由 slice 裁掉
+    if (has2) out.push(table[(n >>> 6) & 63])
+    if (has3) out.push(table[n & 63])
   }
-  r.push("=".repeat((4 - (r.length % 4)) % 4))
-  return r.join("")
+  return out.join("").slice(0, total)
 }
 
-function sm3BytesArray(data: string): number[] {
-  return Array.from(sm3(utf8(data)))
+/** 4 字节前缀：3 组（随机数, 固定掩码 [3,45] [1,0] [1,5]） */
+function prefixBytes(randoms: number[]): number[] {
+  const masks = [[3, 45], [1, 0], [1, 5]]
+  const out: number[] = []
+  for (let k = 0; k < 3; k++) {
+    const r = Math.trunc(randoms[k] || 0)
+    const lo = r % 256
+    const hi = Math.floor(r / 256) % 256
+    const [o0, o1] = masks[k]
+    out.push((lo & 170) | (o0 & 85))
+    out.push((lo & 85) | (o0 & 170))
+    out.push((hi & 170) | (o1 & 85))
+    out.push((hi & 85) | (o1 & 170))
+  }
+  return out
 }
 
-/** Python: sm3.sm3_hash 再每 2 位十六进制转字节 —— 等价于对同一输入取 SM3 摘要字节 */
-function sm3ToArray(data: string): number[] { return sm3BytesArray(data) }
-
-function generateParamsCode(params: string): number[] {
-  return sm3ToArray(fromCharCode(sm3ToArray(params + END_STRING)))
-}
-function generateMethodCode(method: string): number[] {
-  return sm3ToArray(fromCharCode(sm3ToArray(method + END_STRING)))
-}
-
-function generateArgsCode(): number[] {
-  const a: number[] = []
-  for (let j = 24; j >= 0; j -= 8) a.push(ARGUMENTS[0] >> j)
-  a.push(
-    Math.trunc(ARGUMENTS[1] / 256),
-    ARGUMENTS[1] % 256,
-    ARGUMENTS[1] >> 24,
-    ARGUMENTS[1] >> 16,
-  )
-  for (let j = 24; j >= 0; j -= 8) a.push(ARGUMENTS[2] >> j)
-  return a.map((i) => i & 255)
+export interface AbogusOptions {
+  /** 必须与请求头里的 User-Agent 完全一致（UA 那一路参与签名） */
+  ua?: string
+  /** 环境指纹串，缺省用前端默认（Win32 那串） */
+  windowEnv?: string
+  /** 毫秒时间戳（start_time） */
+  timestamp?: number
+  /** 三次 SM3 结束时的毫秒；缺省 timestamp + 0~3ms */
+  endTimestamp?: number
+  /** 前缀用的 3 个随机数（缺省随机） */
+  randoms?: [number, number, number]
 }
 
-function generateString2List(urlParams: string, method: string, startTime: number, endTime: number, browserLen: number): number[] {
-  const paramsArray = generateParamsCode(urlParams)
-  const methodArray = generateMethodCode(method)
-  return list4(
-    (endTime >> 24) & 255,
-    paramsArray[21],
-    UA_CODE[23],
-    (endTime >> 16) & 255,
-    paramsArray[22],
-    UA_CODE[24],
-    (endTime >> 8) & 255,
-    endTime & 255,
-    (startTime >> 24) & 255,
-    (startTime >> 16) & 255,
-    (startTime >> 8) & 255,
-    startTime & 255,
-    methodArray[21],
-    methodArray[22],
-    Math.trunc(endTime / 4294967296),
-    Math.trunc(startTime / 4294967296),
-    browserLen,
-  )
+/** 对**已拼好的 query 串**签名（golden 对拍 / 需要精确控制顺序时用） */
+export function abogusFromQuery(qs: string, opts: AbogusOptions = {}): string {
+  const ua = opts.ua ?? DEFAULT_UA
+  const env = opts.windowEnv ?? DEFAULT_WINDOW_ENV
+  const start = Math.floor(opts.timestamp ?? Date.now())
+  const end = Math.floor(opts.endTimestamp ?? (start + Math.floor(Math.random() * 4)))
+  const randoms: number[] = opts.randoms ?? [0, 0, 0].map(() => Math.floor(Math.random() * 10001))
+
+  // 三次 SM3：参数串 / 后缀 / UA（UA 那一路是 rc4 → 变体 b64(s3) → SM3）
+  const hashParams = sm3(sm3(utf8(qs + SUFFIX)))
+  const hashSuffix = sm3(sm3(utf8(SUFFIX)))
+  const uaHash = sm3(latin1Bytes(rawEncode(fromCharCode(rc4Bytes([0, 1, 14], Array.from(utf8(ua)))), SHIFT_S3)))
+
+  const envCodes = charCodes(env)
+  const b: number[] = new Array<number>(80).fill(0)
+  b[8] = 3
+  b[10] = end
+  b[16] = start
+  b[18] = 44
+  b[19] = 1                                   // 前端 b[19] 只承载 [1,0,1,5] 的首位
+  b[20] = byteAt(start, 24)
+  b[21] = byteAt(start, 16)
+  b[22] = byteAt(start, 8)
+  b[23] = start % 256
+  b[24] = byteAt(start, 32)
+  b[25] = byteAt(start, 40)
+  b[26] = byteAt(ARGUMENTS[0], 24)
+  b[27] = byteAt(ARGUMENTS[0], 16)
+  b[28] = byteAt(ARGUMENTS[0], 8)
+  b[29] = ARGUMENTS[0] % 256
+  b[30] = Math.floor(ARGUMENTS[1] / 256) % 256
+  b[31] = ARGUMENTS[1] % 256
+  b[32] = byteAt(ARGUMENTS[1], 24)
+  b[33] = byteAt(ARGUMENTS[1], 16)
+  b[34] = byteAt(ARGUMENTS[2], 24)
+  b[35] = byteAt(ARGUMENTS[2], 16)
+  b[36] = byteAt(ARGUMENTS[2], 8)
+  b[37] = ARGUMENTS[2] % 256
+  b[38] = hashParams[21]
+  b[39] = hashParams[22]
+  b[40] = hashSuffix[21]
+  b[41] = hashSuffix[22]
+  b[42] = uaHash[23]                          // UA 这一路取 23/24（前端就这么写的）
+  b[43] = uaHash[24]
+  b[44] = byteAt(end, 24)
+  b[45] = byteAt(end, 16)
+  b[46] = byteAt(end, 8)
+  b[47] = end % 256
+  b[48] = b[8]
+  b[49] = byteAt(end, 32)
+  b[50] = byteAt(end, 40)
+  b[51] = AB_PAGE_ID
+  b[52] = byteAt(AB_PAGE_ID, 24)
+  b[53] = byteAt(AB_PAGE_ID, 16)
+  b[54] = byteAt(AB_PAGE_ID, 8)
+  b[55] = AB_PAGE_ID % 256
+  b[56] = AB_AID
+  b[57] = AB_AID % 256
+  b[58] = byteAt(AB_AID, 8)
+  b[59] = byteAt(AB_AID, 16)
+  b[60] = byteAt(AB_AID, 24)
+  b[64] = envCodes.length
+  b[65] = envCodes.length % 256
+  b[66] = byteAt(envCodes.length, 8)
+  b[69] = 0
+  b[70] = 0
+  b[71] = 0
+  b[72] = (
+    b[18] ^ b[20] ^ b[26] ^ b[30] ^ b[38] ^ b[40] ^ b[42] ^ b[21] ^
+    b[27] ^ b[31] ^ b[35] ^ b[39] ^ b[41] ^ b[43] ^ b[22] ^
+    b[28] ^ b[32] ^ b[36] ^ b[23] ^ b[29] ^ b[33] ^ b[37] ^
+    b[44] ^ b[45] ^ b[46] ^ b[47] ^ b[48] ^ b[49] ^ b[50] ^
+    b[24] ^ b[25] ^ b[52] ^ b[53] ^ b[54] ^ b[55] ^ b[57] ^
+    b[58] ^ b[59] ^ b[60] ^ b[65] ^ b[66] ^ b[70] ^ b[71]
+  ) & 255
+
+  const core = [
+    b[18], b[20], b[52], b[26], b[30], b[34], b[58], b[38],
+    b[40], b[53], b[42], b[21], b[27], b[54], b[55], b[31],
+    b[35], b[57], b[39], b[41], b[43], b[22], b[28], b[32],
+    b[60], b[36], b[23], b[29], b[33], b[37], b[44], b[45],
+    b[59], b[46], b[47], b[48], b[49], b[50], b[24], b[25],
+    b[65], b[66], b[70], b[71],
+  ]
+  const payload = core.concat(envCodes, [b[72]])
+  const encrypted = rc4Bytes([121], payload)
+  const full = prefixBytes(randoms).concat(encrypted)
+  return rawEncode(fromCharCode(full), SHIFT_S4) + "="
 }
 
-function generateString2(urlParams: string, method: string, startTime: number, endTime: number, browser: string): string {
-  const a = generateString2List(urlParams, method, startTime, endTime, browser.length)
-  const e = endCheckNum(a)
-  a.push(...charCodes(browser))
-  a.push(e)
-  return rc4Encrypt(fromCharCode(a), "y")
-}
-
-/** Python urllib.parse.urlencode 的等价实现（quote_plus：空格 → +，非 ASCII → %XX 大写） */
+/** Python `urllib.parse.urlencode` 的等价实现（quote_plus：空格 → +，非 ASCII → %XX 大写） */
 export function urlencode(params: Record<string, string>): string {
   const enc = (s: string) =>
     encodeURIComponent(s)
@@ -276,18 +321,20 @@ export function urlencode(params: Record<string, string>): string {
   return Object.keys(params).map((k) => `${enc(k)}=${enc(String(params[k]))}`).join("&")
 }
 
-/** 生成 a_bogus（参数顺序 = 最终查询串里的顺序，且不含 a_bogus / uifid / timestamp） */
-export function abogus(params: Record<string, string>, method = "GET"): string {
-  const startTime = Date.now()
-  const endTime = startTime + 4 + Math.floor(Math.random() * 5)          // Python: randint(4, 8)
-  const string1 = generateString1()
-  const string2 = generateString2(urlencode(params), method, startTime, endTime, DEFAULT_BROWSER)
-  return generateResult(string1 + string2, "s4")
+/**
+ * 生成 a_bogus（参数顺序 = 最终查询串里的顺序，且不含 a_bogus / uifid / timestamp）
+ * @param method 保留参数（前端这一版不参与签名，与 Python 版一致）
+ */
+export function abogus(params: Record<string, string>, method = "GET", opts: AbogusOptions = {}): string {
+  return abogusFromQuery(urlencode(params), opts)
 }
 
-/** 供离线自检：用固定随机数与时间生成，结果可复现 */
-export function abogusDeterministic(params: Record<string, string>, r1: number, r2: number, r3: number, startTime: number, endTime: number, method = "GET"): string {
-  const string1 = generateString1(r1, r2, r3)
-  const string2 = generateString2(urlencode(params), method, startTime, endTime, DEFAULT_BROWSER)
-  return generateResult(string1 + string2, "s4")
+/** 供离线自检：随机数与时间全部外部指定，结果可复现（旧签名保持兼容） */
+export function abogusDeterministic(
+  params: Record<string, string>, r1: number, r2: number, r3: number,
+  startTime: number, endTime: number, method = "GET", ua?: string,
+): string {
+  return abogusFromQuery(urlencode(params), {
+    ua, timestamp: startTime, endTimestamp: endTime, randoms: [r1, r2, r3],
+  })
 }

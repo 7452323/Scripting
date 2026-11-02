@@ -1,11 +1,11 @@
 import {
   Navigation, Script, TabView, Tab,
-  VStack, HStack, Text, Button, TextField,
+  VStack, HStack, Text, Button, TextField, Toggle,
   Spacer, ScrollView, Image, LazyVGrid, ProgressView,
   useState, useEffect, useMemo, useCallback, fetch, VideoPlayer,
   NavigationStack, List, Section, GeometryReader, WebView,
 } from "scripting"
-import { abogus } from "./abogus"
+import { abogusFromQuery } from "./abogus"
 
 // (download 函数运行时不存在，已改用 fetch + Data + FileManager)
 // Data.fromArrayBuffer 由运行时 Data 类提供，无需 custom declare
@@ -18,7 +18,7 @@ const KEY_UIFID = "douyin_uifid"
 const KEY_DEVICE_ID = "douyin_device_id"
 const KEY_INSTALL_ID = "douyin_install_id"
 const KEY_SEEN_VERSION = "seen_version"
-const SCRIPT_VERSION = "1.0.37"
+const SCRIPT_VERSION = "1.0.51"
 
 // 运行时全局对象
 declare const screen: { width: number; height: number; scale: number } | undefined
@@ -1352,13 +1352,43 @@ function VideoPreviewView({ video }: { video: VideoInfo }) {
 
 // ─── 打开视频（防双击） ───
 let _openingVideo = false
+// ─── 播放地址探活（CDN 直链带 dy_q/l 时间戳，约 2–4 小时过期后 403） ───
+const CDN_HEADERS = { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" }
+/** 探活结果缓存（url → 探测时间），只缓存“可用”，避免每次打开都多一个网络往返 */
+const playUrlAliveCache = new Map<string, number>()
+
+/**
+ * 直链是否还能用：发 1 字节 Range 请求。
+ * 实测（douyin-sign docs/06-limits）：CDN 有 Referer 白名单，非抖音 referer 直接 403；
+ * 所以这里必须带 `Referer: https://www.douyin.com/`（不带也行，带别的站会挂）。
+ */
+async function isPlayUrlAlive(url: string): Promise<boolean> {
+  if (!url) return false
+  // 探活过就缓存 10 分钟：同一地址反复点开/切换不用每次都等一个来回
+  const hit = playUrlAliveCache.get(url)
+  if (hit && Date.now() - hit < 10 * 60 * 1000) return true
+  try {
+    const res = await timeoutFetch(fetch(url, { method: "GET", headers: { ...CDN_HEADERS, Range: "bytes=0-0" } }), 6000)
+    if (res.ok || res.status === 206) {
+      if (playUrlAliveCache.size > 60) playUrlAliveCache.clear()
+      playUrlAliveCache.set(url, Date.now())
+      return true
+    }
+    return false
+  } catch { return false }
+}
+
 async function openVideo(video: VideoInfo, _idx?: number) {
   if (_openingVideo) return
   _openingVideo = true
   try {
-    // 分享页通道拿到的条目没有播放地址（图文也没图集 URL）→ 用移动端 detail 接口补一次
+    // 分享页通道拿到的条目没有播放地址（图文也没图集 URL）→ 用移动端 detail 接口补一次；
+    // 有地址但已过期（历史记录里的旧条目）→ 也要重取，否则点开直接黑屏 / 403
     let v = video
-    if (v.aweme_id && (!v.play_url || (v.images.length > 0 && !v.images[0]?.url))) {
+    const probe = v.play_url || v.images.find((i) => i.url)?.url || ""
+    const stale = probe ? !(await isPlayUrlAlive(probe)) : false
+    const needDetail = !v.play_url || (v.images.length > 0 && !v.images[0]?.url)
+    if (v.aweme_id && (needDetail || stale)) {
       try {
         const detail = await fetchAwemeDetail(v.aweme_id)
         if (detail) {
@@ -1397,6 +1427,7 @@ function addToHistory(video: VideoInfo) {
   const history = loadHistory(); const idx = history.findIndex((h) => h.aweme_id === video.aweme_id)
   if (idx >= 0) history.splice(idx, 1)
   history.unshift({ ...video, viewed_at: Date.now() }); saveHistory(history)
+  scheduleCloudSync()
 }
 function loadSavedUsers(): SavedUser[] {
   try { const raw = Storage.get<string>(KEY_SAVED_USERS); if (!raw) return []; return Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [] }
@@ -1408,9 +1439,21 @@ function loadCurrentSavedUser(): SavedUser | null {
   return loadSavedUsers().find((u) => u.id === uid) || null
 }
 function saveUser(user: SavedUser) {
-  const users = loadSavedUsers(); const idx = users.findIndex((u) => u.id === user.id)
-  if (idx >= 0) users.splice(idx, 1); users.unshift(user)
+  const users = loadSavedUsers()
+  const idx = users.findIndex((u) => u.id === user.id)
+  const prev = idx >= 0 ? users[idx] : null
+  // ⚠️ 空值不覆盖旧值：分享页通道的条目没有 author，写回空昵称会让用户变「未命名」、头像也丢
+  const merged: SavedUser = {
+    ...user,
+    nickname: user.nickname || prev?.nickname || "",
+    avatar: user.avatar || prev?.avatar || "",
+    shortId: user.shortId || prev?.shortId || "",
+    ipLocation: user.ipLocation || prev?.ipLocation || "",
+  }
+  if (idx >= 0) users.splice(idx, 1)
+  users.unshift(merged)
   Storage.set(KEY_SAVED_USERS, JSON.stringify(users))
+  scheduleCloudSync()
 }
 
 // ─── 抖音号解析 ───
@@ -1838,7 +1881,9 @@ async function fetchViaWebsign(secUid: string, cursor: number = 0, allowRetry: b
     cpu_core_num: "8", device_memory: "8", platform: "PC", downlink: "10",
   }
   const pairs: Array<[string, string]> = Object.keys(params).map((k) => [k, params[k]])
-  pairs.push(["a_bogus", abogus(params)])
+  // ⚠ a_bogus 签的是「实际发出去的 query 串」：用同一套编码先拼好再签，别用另一套编码重拼
+  const signedPart = pairs.map(([k, v]) => `${pyQuote(k)}=${pyQuote(v)}`).join("&")
+  pairs.push(["a_bogus", abogusFromQuery(signedPart, { ua: DESKTOP_UA })])
   if (sv) pairs.push(["verifyFp", sv], ["fp", sv])
   const stamp = String(Math.floor(Date.now() / 1000))
   pairs.push(["uifid", uifid], ["timestamp", stamp])
@@ -2005,9 +2050,13 @@ let lastListSource: "signer" | "share" | "" = ""
 
 /** 签名器失败后的冷却（避免未登录/出错时每次加载都白等 1 秒） */
 let signerDeadUntil = 0
+/** 超时导致的短暂冷却：Python.run 是串行队列且不能取消，连续重试会越积越多 */
+let signerSlowUntil = 0
 function markSignerDead() { signerDeadUntil = Date.now() + 5 * 60 * 1000 }
+function markSignerSlow() { signerSlowUntil = Date.now() + 90 * 1000 }
 function signerUsable() {
-  if (Date.now() < signerDeadUntil) return false
+  const now = Date.now()
+  if (now < signerDeadUntil || now < signerSlowUntil) return false
   return !!(Storage.get<string>(KEY_COOKIE) || "").trim()
 }
 
@@ -2018,8 +2067,16 @@ function signerUsable() {
  * 实测：30 条 / 2.3MB / has_more=1 / max_cursor 可翻页 / 自带 play_addr。
  *
  * 实现：Scripting 的 `Python.run` 直接跑 `pysign/sign` 包（cookie 只以字符串形式进内存，不落盘）。
+ *
+ * 2026-11-01 A/B 实测（同账号、同 query、真登录 Cookie），四组返回**完全一致**：
+ *   23.3 形态 + seed 设备 → sc=0，8 条，has_more=0
+ *   38.7 形态 + seed 设备 → sc=0，8 条（相同 id）
+ *   23.3 形态 + 真 Device  → sc=0，8 条
+ *   38.7 形态 + 真 Device  → sc=0，8 条
+ * ⇒ 服务端既不校验「头形态与版本一致」，也不校验 Argus 里的 device_id 与 query 是否一致。
+ *   所以维持 `sign_all()`（23.3 形态）即可；免得为了切 38.7 去同步 medusa387 那一堆模块。
  */
-async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number; ok: boolean }> {
+async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batchPages: number = 1): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number; ok: boolean }> {
   const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
   if (!cookie) throw new Error("没有 Cookie")
   const dir = resolvePysignDir()
@@ -2034,8 +2091,13 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Prom
   L.push("import sys, json, ssl, time, urllib.request")
   L.push("sys.path.insert(0, " + JSON.stringify(dir) + ")")
   L.push("from sign import sign_all")
-  L.push("from sign.device import make_seed_device")
-  L.push("dev = make_seed_device()")
+  L.push("from sign.device import Device")
+  // 固定设备画像：make_seed_device() 的 device_type / os_version / app_version / openudid 等
+  // 每次调用都是 random.choice → 同一个 Cookie 下每页签名都像“换了台手机”，容易被风控盯上。
+  L.push("dev = Device('1923489864614387', '7683339722235938341',")
+  L.push("  device_type='iPhone17,3', os=14, os_version='27.0.1', app_version='40.4.0', channel='App Store',")
+  L.push("  openudid='0f1e2d3c4b5a69788796a5b4c3d2e1f0', cdid='A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D',")
+  L.push("  clientudid='9f8e7d6c5b4a39281706f5e4d3c2b1a0')")
   L.push("cookie = " + JSON.stringify(cookie))
   L.push("base = {'device_platform':'iphone','aid':'1128','channel':'App%20Store','app_name':'aweme',")
   L.push(" 'version_code':'40.4.0','version_name':'40.4.0','device_type':'iPhone17,3','os_version':'27.0.1',")
@@ -2055,10 +2117,22 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Prom
   L.push("    r = urllib.request.urlopen(req, timeout=tmo, context=ssl._create_unverified_context())")
   L.push("    return r.read().decode('utf-8', 'ignore')")
   L.push("out = {}")
-  L.push("try:")
-  L.push("    out['post'] = call('/aweme/v1/aweme/post/', {'sec_user_id': " + JSON.stringify(secUid) + ", 'max_cursor': " + JSON.stringify(effCursor) + ", 'count': '30', 'publish_video_strategy_type': '2', 'source': '0'})")
-  L.push("except Exception as e:")
-  L.push("    out['err'] = str(e)[:200]")
+  L.push("pages = []")
+  L.push("cur = " + JSON.stringify(effCursor))
+  // 一次 Python 进程里连拉 batchPages 页：Python 冷启动 ~3.5s，
+  // 逐页调的话 300 条要 11 次启动（≈ 40s）→ 批量后只需 4 次（≈ 15s）。
+  L.push("for _i in range(" + String(Math.max(1, batchPages)) + "):")
+  L.push("    try:")
+  L.push("        _t = call('/aweme/v1/aweme/post/', {'sec_user_id': " + JSON.stringify(secUid) + ", 'max_cursor': str(cur), 'count': '30', 'publish_video_strategy_type': '2', 'source': '0'})")
+  L.push("        _j = json.loads(_t)")
+  L.push("        pages.append(_j)")
+  L.push("        cur = str(_j.get('max_cursor') or 0)")
+  L.push("        if not _j.get('aweme_list') or _j.get('has_more') != 1:")
+  L.push("            break")
+  L.push("    except Exception as e:")
+  L.push("        out['err'] = str(e)[:200]")
+  L.push("        break")
+  L.push("out['pages'] = pages")
   if (needTotal) {
     // 作品总数（aweme_count）：用于判断「是不是真的全了」——
     // 未登录/仅好友可见的作品不会进 post 列表，旧版本却照样写「已加载全部作品」。
@@ -2079,9 +2153,26 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Prom
   }
   if (bi >= 0 && ei > bi) { try { parsed = safeJSONParse(raw.slice(bi + 5, ei)) } catch { /* keep */ } }
   if (!parsed) throw new Error("签名器返回无法解析")
-  if (parsed?.err) throw new Error("签名请求失败：" + String(parsed.err))
-  const post = typeof parsed.post === "string" ? safeJSONParse(parsed.post) : parsed.post
-  const list: any[] = Array.isArray(post?.aweme_list) ? post.aweme_list : []
+  const pagesArr: any[] = Array.isArray(parsed.pages) ? parsed.pages : []
+  // 有部分页成功时不能因为后面某一页报错就把已拉到的全丢
+  if (parsed?.err && pagesArr.length === 0) throw new Error("签名请求失败：" + String(parsed.err))
+  const source: any[] = pagesArr.length > 0
+    ? pagesArr
+    : [typeof parsed.post === "string" ? safeJSONParse(parsed.post) : parsed.post]
+  const list: any[] = []
+  const seenIds = new Set<string>()
+  for (const pg of source) {
+    const arr: any[] = Array.isArray(pg?.aweme_list) ? pg.aweme_list : []
+    for (const it of arr) {
+      const id = String(it?.aweme_id || "")
+      if (id) {
+        if (seenIds.has(id)) continue
+        seenIds.add(id)
+      }
+      list.push(it)
+    }
+  }
+  const lastPg: any = source[source.length - 1] || {}
   const videos: VideoInfo[] = list
     .filter((it: any) => Number(it?.aweme_type) !== 101)
     .map(awemeToVideoInfo)
@@ -2096,19 +2187,19 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0): Prom
   } catch { totalCount = 0 }
   lastListSource = "signer"
   // ok=true 表示「请求本身成功」：即使 aweme_list 为空（已翻到尾部），也不该再回退到分享页
-  return { videos: ordered, maxCursor: Number(post?.max_cursor) || 0, hasMore: Number(post?.has_more) === 1, totalCount, ok: true }
+  return { videos: ordered, maxCursor: Number(lastPg?.max_cursor) || 0, hasMore: Number(lastPg?.has_more) === 1, totalCount, ok: true }
 }
 
 /** 最近一次签名通道拿到的「作品总数」（aweme_count，含仅自己可见的作品） */
 let lastAwemeCount = 0
 
 /** 单次取一页（内部用） */
-async function fetchUserPostsOnce(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+async function fetchUserPostsOnce(secUid: string, cursor: number = 0, opts: { noCooldown?: boolean; signerOnly?: boolean; batch?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
   let lastError: unknown = null
   // ① 主通道：登录态 + 你自己的 Python 签名包（完整分页、最快最全）
   if (signerUsable()) {
     try {
-      const parsed = await fetchUserPostsViaSigner(secUid, cursor)
+      const parsed = await fetchUserPostsViaSigner(secUid, cursor, opts.batch ?? 1)
       if (parsed.totalCount > 0) lastAwemeCount = parsed.totalCount
       if (parsed.videos.length > 0) return parsed
       // 签名请求成功但列表为空 = 已经翻到底（不是通道失败）→ 直接当成功返回，
@@ -2116,10 +2207,24 @@ async function fetchUserPostsOnce(secUid: string, cursor: number = 0): Promise<{
       if (parsed.ok) return parsed
     } catch (e) {
       lastError = e
-      // 超时属于排队/网络问题，不代表签名器坏了 —— 不要因此让它冷却 5 分钟
+      // 超时：Python 串行队列排不过来（实测积压时一个 print 要等 37s）。
+      // 这时必须「短暂」停止尝试，否则用户每点一次刷新就往队列里再塞一个 30s 任务，越积越多。
+      // 后台续拉（noCooldown）更不能影响前台。
       const msg = String((e as any)?.message || e)
-      if (msg.indexOf("timeout") < 0) markSignerDead()
+      if (!opts.noCooldown) {
+        if (msg.indexOf("timeout") >= 0) markSignerSlow()
+        else markSignerDead()
+      }
     }
+  }
+  // ⚠️ 翻页（cursor>0 / 后台续拉）只允许签名通道：
+  // 分享页只支持首页，拿它去“补页”只会返回重复内容，还会把 has_more 误设成 false
+  // → 底部就会谎报「已显示 30 / 共 155，差的 125 条是私密作品」。
+  if (opts.signerOnly) {
+    // silent：分页失败属于内部状态（后台会自动重试），不能弹到用户头顶
+    const err: any = lastError instanceof Error ? lastError : new Error("分页失败")
+    err.silent = true
+    throw err
   }
   // ② 移动端免签通道（现在基本返空，留着以防平台又放开）
   try {
@@ -2146,57 +2251,17 @@ async function fetchUserPostsOnce(secUid: string, cursor: number = 0): Promise<{
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
-/** 上一次续拉（第 2/3 页）失败的原因；footer 用它区分「网络失败」与「未公开作品」 */
-let lastPartialError = ""
-
 /**
  * 对外入口。
- * ⭐ 首页额外做一件事：某些账号（小号）第一页只回几条但 has_more 仍是 true，
- *   光拉一页会让人以为“作品就这么点” → 条目 < 20 时自动续拉（最多 2 页）、去重、重排。
+ * ⚠ 首屏**只拉一页**：以前小号（<20 条且 has_more）会同步再拉 2 页，
+ *   那是 2–3 次 Python 调用 ≈ 3–5s 的白等（用户 2026-11-01 反馈「切用户后第一次加载太久」）。
+ *   剩下的页交给 `pullRestInBackground` 在后台增量补，界面先上屏。
  */
-export async function fetchUserPosts(secUid: string, cursor: number = 0): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number }> {
+export async function fetchUserPosts(secUid: string, cursor: number = 0, opts: { signerOnly?: boolean; batch?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number }> {
   // 首屏重置总数：切用户后若新用户的签名通道失败，不能把上一个账号的 aweme_count 当成它的
-  if (cursor === 0) { lastAwemeCount = 0; lastPartialError = "" }
-  const first = await fetchUserPostsOnce(secUid, cursor)
-  // 只有首屏、且条目偏少、且还有更多时才续拉（用户翻页时不走这里）
-  if (cursor !== 0 || first.videos.length >= 20 || first.hasMore !== true) return { ...first, totalCount: lastAwemeCount }
-
-  const merged: VideoInfo[] = first.videos.slice()
-  const seen = new Set<string>(merged.map((v) => v.aweme_id))
-  let cur: number = first.maxCursor
-  let more: boolean = first.hasMore
-
-  const absorb = (list: VideoInfo[]) => {
-    for (const v of list) {
-      if (v.aweme_id && !seen.has(v.aweme_id)) { seen.add(v.aweme_id); merged.push(v) }
-    }
-  }
-
-  // 第 2 页
-  try {
-    const p2 = await fetchUserPostsOnce(secUid, cur)
-    absorb(p2.videos)
-    cur = p2.maxCursor
-    more = p2.hasMore === true
-  } catch (e) {
-    more = false
-    lastPartialError = String((e as any)?.message || e).slice(0, 60)
-  }
-
-  // 第 3 页（仍不足 20 条时）
-  if (more === true && merged.length < 20) {
-    try {
-      const p3 = await fetchUserPostsOnce(secUid, cur)
-      absorb(p3.videos)
-      cur = p3.maxCursor
-      more = p3.hasMore === true
-    } catch (e) {
-      more = false
-      lastPartialError = String((e as any)?.message || e).slice(0, 60)
-    }
-  }
-
-  return { videos: fixOrder(merged), maxCursor: cur, hasMore: more, totalCount: lastAwemeCount }
+  if (cursor === 0) lastAwemeCount = 0
+  const first = await fetchUserPostsOnce(secUid, cursor, opts)
+  return { ...first, totalCount: lastAwemeCount }
 }
 
 // ─── 获取用户完整资料 ───
@@ -2514,7 +2579,8 @@ async function validateCookieString(cookie: string): Promise<{ valid: boolean; d
     try { json = JSON.parse(text) } catch { return { valid: false, detail: "Cookie 校验返回异常" } }
     const u = json?.user || {}
     if (json.status_code === 0 && (u.uid || u.nickname)) {
-      return { valid: true, detail: `已登录：${u.nickname || u.uid}` }
+      // 昵称在顶部“当前用户”卡片里已有，这里只报状态，避免长文本被截成省略号
+      return { valid: true, detail: "已登录" }
     }
     if (json.status_code === 8) return { valid: false, detail: "登录已失效，请重新登录" }
     if (json.status_code === 3 || json.status_code === -99) return { valid: false, detail: "Cookie 已过期，请重新登录" }
@@ -2637,6 +2703,227 @@ function cookieSignature(): string {
 let resetInFlight: { uid: string; seq: number } | null = null
 let loadSeq = 0
 
+/**
+ * 后台续拉的令牌：切用户 / 刷新时自增 → 旧的后台循环在下一个检查点自行退出。
+ * 为什么要后台续拉：首屏 30 条先上屏保证手感，剩下的页在背后一页一页拉（每页 ~2s），
+ * 拉到的条目实时追到列表里。不能一次性全拉 —— 328 条要 11 页 ≈ 22s，会卡住首屏。
+ */
+let bgPullToken = 0
+let bgPullBusy = false
+let bgPending: { uid: string; cursor: number; token: number } | null = null
+
+/**
+ * 每个用户的首屏快照（内存）。
+ * 切回看过的账号 → 立刻上屏（0ms），再静默刷新一次。
+ * 为什么需要：首屏必须走 Python 签名（冷启动 3–4s），来回切账号时每次白等太难受。
+ */
+const listCache = new Map<string, {
+  videos: VideoInfo[]; cursor: number; hasMore: boolean; totalCount: number
+  userInfo: { nickname: string; avatar: string }; cookieSig: string; ts: number
+}>()
+const LIST_CACHE_TTL = 30 * 60 * 1000
+
+// ─── 跨进程首屏快照（写到 Storage）───
+// 内存 listCache 只能管住同一次进程；App 重开时它空了，就得白等一次 Python 冷启动（3–6s）。
+// 把「当前用户上一次的首屏 + 第几页」写进 Storage，下次打开先立即上屏再静默刷新。
+const KEY_LAST_LIST = "douyin_last_list"
+
+interface LastListSnap {
+  videos: VideoInfo[]; cursor: number; hasMore: boolean; totalCount: number
+  userInfo: { nickname: string; avatar: string }
+}
+
+function loadLastList(uid: string): LastListSnap | null {
+  if (!uid) return null
+  try {
+    const raw = Storage.get<string>(KEY_LAST_LIST) || ""
+    if (!raw) return null
+    const o: any = safeJSONParse(raw)
+    if (!o || o.uid !== uid) return null
+    if (o.cookieSig && o.cookieSig !== cookieSignature()) return null
+    if (!Array.isArray(o.videos) || o.videos.length === 0) return null
+    return {
+      videos: o.videos,
+      cursor: Number(o.cursor) || 0,
+      hasMore: o.hasMore === true,
+      totalCount: Number(o.totalCount) || 0,
+      userInfo: o.userInfo && typeof o.userInfo === "object"
+        ? { nickname: String(o.userInfo.nickname || ""), avatar: String(o.userInfo.avatar || "") }
+        : { nickname: "", avatar: "" },
+    }
+  } catch { return null }
+}
+
+function saveLastList() {
+  try {
+    if (!worksCache.uid || worksCache.videos.length === 0) return
+    Storage.set(KEY_LAST_LIST, JSON.stringify({
+      uid: worksCache.uid,
+      cookieSig: cookieSignature(),
+      ts: Date.now(),
+      videos: worksCache.videos.slice(0, 90),
+      cursor: worksCache.cursor,
+      hasMore: worksCache.hasMore,
+      totalCount: worksCache.totalCount,
+      userInfo: worksCache.userInfo,
+    }))
+  } catch { }
+}
+
+// ─── iCloud 同步（iCloud Drive 单文件 + 字段级双向合并）───
+// 为什么不用 CloudSharedData：它要求先在设置里手动建 store 再填 UUID，
+// 对“打开开关就该能同步”的场景太重。iCloud Drive 上一个 JSON 就够了，
+// 多设备各写一份时做字段级合并，避开整体覆盖。
+const KEY_ICLOUD_ON = "douyin_icloud_on"
+const KEY_ICLOUD_LAST = "douyin_icloud_last"
+const SYNC_DIR = "JingHuaShuiYue"
+const SYNC_FILE = "sync.json"
+const SYNC_SCHEMA = 1
+const SYNC_HISTORY_MAX = 500
+
+type SyncResult = "ok" | "disabled" | "nocloud" | "error"
+interface SyncStatus { at: number; result: SyncResult; users: number; history: number; detail?: string }
+
+function icloudSyncOn(): boolean { return (Storage.get<string>(KEY_ICLOUD_ON) ?? "1") !== "0" }
+function setIcloudSyncOn(v: boolean) { try { Storage.set(KEY_ICLOUD_ON, v ? "1" : "0") } catch { } }
+
+function loadSyncStatus(): SyncStatus | null {
+  try {
+    const raw = Storage.get<string>(KEY_ICLOUD_LAST) || ""
+    if (!raw) return null
+    const o: any = safeJSONParse(raw)
+    if (!o || typeof o.result !== "string") return null
+    return {
+      at: Number(o.at) || 0,
+      result: o.result as SyncResult,
+      users: Number(o.users) || 0,
+      history: Number(o.history) || 0,
+      detail: typeof o.detail === "string" ? o.detail : undefined,
+    }
+  } catch { return null }
+}
+function saveSyncStatus(s: SyncStatus) { try { Storage.set(KEY_ICLOUD_LAST, JSON.stringify(s)) } catch { } }
+
+function icloudReady(): boolean {
+  try { return FileManager.isiCloudEnabled === true } catch { return false }
+}
+
+function syncFilePath(): string {
+  const dir = FileManager.iCloudDocumentsDirectory + "/" + SYNC_DIR
+  if (!FileManager.existsSync(dir)) FileManager.createDirectorySync(dir, true)
+  return dir + "/" + SYNC_FILE
+}
+
+/** 用户列表按 id 合并：空字段让位、计数取大、savedAt 取早（“添加时间”不变） */
+export function mergeSavedUserLists(local: SavedUser[], remote: SavedUser[]): SavedUser[] {
+  const map = new Map<string, SavedUser>()
+  for (const u of local) if (u?.id) map.set(u.id, { ...u })
+  for (const u of remote) {
+    if (!u?.id) continue
+    const cur = map.get(u.id)
+    if (!cur) { map.set(u.id, { ...u }); continue }
+    const out: SavedUser = { ...cur }
+    const strFields: (keyof SavedUser)[] = ["nickname", "avatar", "shortId", "signature", "ipLocation"]
+    for (const k of strFields) {
+      const cv = out[k] as string | undefined
+      const nv = u[k] as string | undefined
+      if (!cv && nv) (out as any)[k] = nv
+    }
+    if (!out.gender && u.gender) out.gender = u.gender
+    const numFields = ["totalFavorited", "followingCount", "followerCount"] as const
+    for (const k of numFields) {
+      const cv = Number(out[k] || 0)
+      const nv = Number(u[k] || 0)
+      if (nv > cv) (out as any)[k] = nv
+    }
+    const sa = out.savedAt || 0
+    const sb = u.savedAt || 0
+    out.savedAt = sa && sb ? Math.min(sa, sb) : (sa || sb)
+    map.set(u.id, out)
+  }
+  return Array.from(map.values()).sort((x, y) => (y.savedAt || 0) - (x.savedAt || 0))
+}
+
+/** 历史按 aweme_id 去重（保留更新的 viewed_at），按时间降序截断 */
+export function mergeHistoryLists(local: HistoryItem[], remote: HistoryItem[]): HistoryItem[] {
+  const map = new Map<string, HistoryItem>()
+  for (const h of local) if (h?.aweme_id) map.set(h.aweme_id, h)
+  for (const h of remote) {
+    if (!h?.aweme_id) continue
+    const cur = map.get(h.aweme_id)
+    if (!cur || (h.viewed_at || 0) > (cur.viewed_at || 0)) map.set(h.aweme_id, h)
+  }
+  return Array.from(map.values())
+    .sort((x, y) => (y.viewed_at || 0) - (x.viewed_at || 0))
+    .slice(0, SYNC_HISTORY_MAX)
+}
+
+/**
+ * 双向合并一次：读云端 → 合并 → 写回本地 Storage → 写回云端。
+ * 不调它会覆盖别的设备新增的条目；调了才能在两边都拿到并集。
+ * 注：**不同步 Cookie、不同步当前用户**（各设备各自登录/各自选号）。
+ */
+function syncWithCloud(): SyncStatus {
+  if (!icloudSyncOn()) {
+    const s: SyncStatus = { at: Date.now(), result: "disabled", users: 0, history: 0 }
+    return s
+  }
+  if (!icloudReady()) {
+    const s: SyncStatus = { at: Date.now(), result: "nocloud", users: 0, history: 0, detail: "iCloud 未登录或未授权" }
+    saveSyncStatus(s)
+    return s
+  }
+
+  const localUsers = loadSavedUsers()
+  const localHistory = loadHistory()
+  let remote: any = null
+  try {
+    const f = syncFilePath()
+    if (FileManager.existsSync(f)) {
+      const txt = FileManager.readAsStringSync(f)
+      if (txt) remote = safeJSONParse(txt)
+    }
+  } catch { remote = null }
+
+  const users = mergeSavedUserLists(localUsers, Array.isArray(remote?.users) ? remote.users : [])
+  const history = mergeHistoryLists(localHistory, Array.isArray(remote?.history) ? remote.history : [])
+
+  try {
+    Storage.set(KEY_SAVED_USERS, JSON.stringify(users))
+    saveHistory(history)
+  } catch { }
+
+  try {
+    FileManager.writeAsStringSync(syncFilePath(), JSON.stringify({
+      schema: SYNC_SCHEMA,
+      updatedAt: Date.now(),
+      users,
+      history,
+    }))
+  } catch (e: any) {
+    const s: SyncStatus = {
+      at: Date.now(), result: "error", users: users.length, history: history.length,
+      detail: String(e?.message || e).slice(0, 60),
+    }
+    saveSyncStatus(s)
+    return s
+  }
+  const s: SyncStatus = { at: Date.now(), result: "ok", users: users.length, history: history.length }
+  saveSyncStatus(s)
+  return s
+}
+
+/** 本地改动后延迟推一次（合并写，不覆盖别处） */
+let cloudSyncTimer: any = null
+function scheduleCloudSync() {
+  if (!icloudSyncOn() || !icloudReady()) return
+  if (cloudSyncTimer) { try { clearTimeout(cloudSyncTimer) } catch { } }
+  cloudSyncTimer = setTimeout(() => {
+    cloudSyncTimer = null
+    try { syncWithCloud() } catch { }
+  }, 2500)
+}
+
 // ─── 主页 ───
 export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () => void; isActive: boolean; homeTab?: boolean }) {
   // 跑在 App 首页 Tab 里时（入口传 homeTab）：没有「关闭 App」这个概念，
@@ -2645,15 +2932,40 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   const inHomeTab = homeTab === true
   const gridCardWidth = getGridCardWidth()
   const [secUid, setSecUid] = useState(() => loadSecUid())
+  const [boot] = useState(() => loadLastList(loadSecUid()))
   // 注意：Storage 读取只能放在惰性初始化里（每个只跑一次），不能在 render 里每次读。
-  const [videos, setVideos] = useState<VideoInfo[]>(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.videos : []))
-  const [loading, setLoading] = useState(false)
+  const [videos, setVideos] = useState<VideoInfo[]>(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.videos : (boot?.videos || [])))
+  // 有上次的快照就**不显示骨架**：直接先上屏，再静默刷新
+  const [loading, setLoading] = useState(() => !!loadSecUid() && (boot?.videos?.length || 0) === 0)
   const [error, setError] = useState("")
-  const [cursor, setCursor] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.cursor : 0))
-  const [hasMore, setHasMore] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.hasMore : false))
-  const [totalCount, setTotalCount] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.totalCount : 0))
+  const [cursor, setCursor] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.cursor : (boot?.cursor || 0)))
+  const [hasMore, setHasMore] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.hasMore : (boot?.hasMore || false)))
+  const [totalCount, setTotalCount] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.totalCount : (boot?.totalCount || 0)))
   const [loadingMore, setLoadingMore] = useState(false)
-  const [userInfo, setUserInfo] = useState<{ nickname: string; avatar: string }>(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.userInfo : { nickname: "", avatar: "" }))
+  const [bgLoading, setBgLoading] = useState(false)
+  const [bgLoaded, setBgLoaded] = useState(0)
+  const [userInfo, setUserInfo] = useState<{ nickname: string; avatar: string }>(() => {
+    if (worksCache.uid !== "" && worksCache.uid === loadSecUid()) return worksCache.userInfo
+    if (boot && (boot.userInfo.nickname || boot.userInfo.avatar)) return boot.userInfo
+    // 冷启动时 worksCache 还是空的 → 先用已保存资料当标题/头像，避免先闪一下「抖音作品」
+    const u = loadCurrentSavedUser()
+    return { nickname: u?.nickname || "", avatar: u?.avatar || "" }
+  })
+
+  // 把跨进程快照灌进内存缓存（必须比首屏拉取那个 effect 先跑）
+  useEffect(() => {
+    if (!boot) return
+    const uid = loadSecUid()
+    if (!uid) return
+    if (worksCache.uid === uid && worksCache.videos.length > 0) return
+    worksCache.uid = uid
+    worksCache.videos = boot.videos
+    worksCache.cursor = boot.cursor
+    worksCache.hasMore = boot.hasMore
+    worksCache.totalCount = boot.totalCount
+    if (boot.userInfo.nickname || boot.userInfo.avatar) worksCache.userInfo = boot.userInfo
+    worksCache.cookieSig = cookieSignature()
+  }, [])
 
   async function doLoadVideos(reset: boolean, uidParam?: string) {
     const targetUid = uidParam || loadSecUid()
@@ -2673,17 +2985,59 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     const sigAtStart = cookieSignature()
     const c = reset ? 0 : cursor
     if (reset) {
-      setLoading(true); setVideos([]); setTotalCount(0); worksCache.totalCount = 0
-      // 切号时先把标题/头像换成目标号的（没有就清空），避免拉取失败时顶部还挂着上一个账号
-      const known = loadSavedUsers().find((u) => u.id === targetUid)
-      const pre = { nickname: known?.nickname || "", avatar: known?.avatar || "" }
-      setUserInfo(pre)
-      worksCache.userInfo = pre
+      // 作废正在跑的后台续拉（它会在下一个检查点退出）
+      bgPullToken++
+      bgPending = null
+      setBgLoading(false)
+      setBgLoaded(0)
+      // 有该账号的旧快照 → 立刻上屏（0ms），不再整页 loading；请求回来后静默替换
+      const snap = listCache.get(targetUid)
+      const hit = !!snap && snap.cookieSig === sigAtStart && (Date.now() - snap.ts) < LIST_CACHE_TTL && snap.videos.length > 0
+      if (hit && snap) {
+        // 快照里的昵称/头像可能是早期脏数据（空）→ 回退到已保存用户，避免标题又变「抖音作品」
+        const knownUser = loadSavedUsers().find((u) => u.id === targetUid)
+        const snapInfo = (snap.userInfo.nickname || snap.userInfo.avatar)
+          ? snap.userInfo
+          : { nickname: knownUser?.nickname || "", avatar: knownUser?.avatar || "" }
+        worksCache.uid = targetUid
+        worksCache.videos = snap.videos
+        worksCache.cursor = snap.cursor
+        worksCache.hasMore = snap.hasMore
+        worksCache.totalCount = snap.totalCount
+        worksCache.userInfo = snapInfo
+        worksCache.cookieSig = sigAtStart
+        setVideos(snap.videos)
+        setCursor(snap.cursor)
+        setHasMore(snap.hasMore)
+        setTotalCount(snap.totalCount)
+        setUserInfo(snapInfo)
+        setLoading(false)
+        setBgLoaded(snap.videos.length)
+      } else {
+        const sameUser = worksCache.uid === targetUid && worksCache.videos.length > 0
+        if (sameUser) {
+          // 同号刷新（例如刚打开 App 用的是跨进程快照）：列表继续显示，静默替换
+          setVideos(worksCache.videos)
+          setCursor(worksCache.cursor)
+          setHasMore(worksCache.hasMore)
+          setTotalCount(worksCache.totalCount)
+          setLoading(false)
+        } else {
+          setLoading(true); setVideos([]); setTotalCount(0); worksCache.totalCount = 0
+          // 切号时先把标题/头像换成目标号的（没有就清空），避免拉取失败时顶部还挂着上一个账号
+          const known = loadSavedUsers().find((u) => u.id === targetUid)
+          const pre = { nickname: known?.nickname || "", avatar: known?.avatar || "" }
+          setUserInfo(pre)
+          worksCache.userInfo = pre
+        }
+      }
     } else { setLoadingMore(true) }
     setError("")
+    let succeeded = false
     try {
-      const result = await fetchUserPosts(targetUid, c)
+      const result = await fetchUserPosts(targetUid, c, reset ? {} : { signerOnly: true })
       if (seq !== loadSeq) return   // 已经有更新的请求了，这次结果作废
+      succeeded = true
       if (reset) {
         setVideos(result.videos)
         worksCache.videos = result.videos
@@ -2702,30 +3056,176 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       setCursor(result.maxCursor)
       setHasMore(result.hasMore)
       setTotalCount(worksCache.totalCount)
-      if (result.videos.length > 0) {
-        const first = result.videos[0]
-        const info = { nickname: first.author_nickname, avatar: first.author_avatar }
+      // 作者信息：
+      // ⚠️ 分享页通道拿到的条目**没有 author 字段**（author_nickname / author_avatar 都是空串），
+      // 空值绝不能覆盖已有昵称/头像 —— 否则标题变「抖音作品」、设置页变「未命名」、头像也丢了。
+      const saved = loadSavedUsers().find((u) => u.id === targetUid)
+      const prevInfo = worksCache.userInfo
+      const first = result.videos.length > 0 ? result.videos[0] : null
+      const info = {
+        nickname: (first?.author_nickname || "").trim() || prevInfo.nickname || saved?.nickname || "",
+        avatar: (first?.author_avatar || "").trim() || prevInfo.avatar || saved?.avatar || "",
+      }
+      if (info.nickname || info.avatar) {
         worksCache.userInfo = info
         setUserInfo(info)
-        // 保留已保存用户的已有字段，同时从作品数据提取 IP 地区
-        const users = loadSavedUsers()
-        const existing = users.find((u) => u.id === targetUid)
+      }
+      if (first) {
         const ipLoc = first.author_ip_location || ""
-        if (existing) {
-          saveUser({ ...existing, nickname: info.nickname, avatar: info.avatar, ipLocation: ipLoc || existing.ipLocation || "" })
+        if (saved) {
+          saveUser({
+            ...saved,
+            nickname: info.nickname || saved.nickname,
+            avatar: info.avatar || saved.avatar,
+            ipLocation: ipLoc || saved.ipLocation || "",
+          })
         } else {
           saveUser({ id: targetUid, ...info, savedAt: Date.now(), ipLocation: ipLoc || "" })
         }
       }
+      // 写快照（放在 userInfo 合并之后，快照里的昵称/头像才是对的）
+      listCache.set(targetUid, {
+        videos: result.videos, cursor: result.maxCursor, hasMore: result.hasMore,
+        totalCount: worksCache.totalCount, userInfo: worksCache.userInfo,
+        cookieSig: sigAtStart, ts: Date.now(),
+      })
+      // 昵称/头像仍然空（典型：走了分享页通道）→ 用免签资料接口补一次，
+      // 别让标题、设置页、切换用户面板里出现「抖音作品 / 未命名」
+      if (!info.nickname && !info.avatar) {
+        fetchUserProfile(targetUid).then((p) => {
+          if (!p) return
+          const cur = loadSavedUsers().find((u) => u.id === targetUid)
+          if (cur) {
+            saveUser({
+              ...cur,
+              ...(p.nickname ? { nickname: p.nickname } : {}),
+              ...(p.avatar ? { avatar: p.avatar } : {}),
+              ...(p.shortId ? { shortId: p.shortId } : {}),
+            })
+          }
+          if (worksCache.uid === targetUid) {
+            const nn = worksCache.userInfo.nickname || p.nickname || ""
+            const av = worksCache.userInfo.avatar || p.avatar || ""
+            if (nn || av) {
+              worksCache.userInfo = { nickname: nn, avatar: av }
+              setUserInfo(worksCache.userInfo)
+            }
+          }
+        }).catch(() => { })
+      }
     } catch (e) {
-      if (seq === loadSeq) setError((e as Error).message)
+      const err: any = e
+      // 分页失败是内部状态（后台会自动重试），不要把技术文案弹到顶栏
+      if (seq === loadSeq && !err?.silent) setError((e as Error).message)
     } finally {
       // 只由「当前这次请求」释放锁，避免被丢弃的旧请求把锁提前清掉
       if (reset && resetInFlight && resetInFlight.seq === seq) resetInFlight = null
       if (seq === loadSeq) {
+        if (succeeded) saveLastList()   // 跨进程首屏快照（不管还有没有更多都存）
         if (reset) setLoading(false)
         else setLoadingMore(false)
       }
+    }
+    // 首屏已上屏 / 手动点了一次「加载更多」→ 剩下的页都交给后台一路补齐（不阻塞 UI）
+    // 只有本次请求真的成功了才启动后台：失败还拉只会再失败一次
+    if (succeeded && seq === loadSeq && worksCache.hasMore) {
+      saveLastList()
+      const token = bgPullToken
+      setBgLoaded(worksCache.videos.length)
+      pullRestInBackground(targetUid, worksCache.cursor, token)
+    }
+  }
+
+  /**
+   * 后台逐页续拉：每拉一页就合并进列表（去重），不阻塞滚动。
+   * 切号/刷新会使 token 失效 → 本循环在下一个检查点退出。
+   */
+  async function pullRestInBackground(uid: string, startCursor: number, token: number) {
+    if (bgPullBusy) {
+      // 排队时记「最新的游标」，否则恢复后会从旧位置重拉一遍
+      bgPending = { uid, cursor: worksCache.cursor || startCursor, token }
+      return
+    }
+    bgPullBusy = true
+    setBgLoading(true)
+    let cur = startCursor || worksCache.cursor
+    let batches = 0
+    let failStreak = 0
+    let emptyStreak = 0
+    const flushUI = () => {
+      setVideos(worksCache.videos)
+      setCursor(worksCache.cursor)
+      setHasMore(worksCache.hasMore)
+      setTotalCount(worksCache.totalCount)
+    }
+    try {
+      while (token === bgPullToken && batches < 20) {
+        // 前台正在重拉时让路：Python.run 是串行队列，抢队列会把首屏拖到超时 → 然后降级分享页
+        let guard = 0
+        while (resetInFlight && guard < 150) {
+          await sleep(200); guard++
+          if (token !== bgPullToken) return
+        }
+        if (token !== bgPullToken) return
+
+        let r: { videos: VideoInfo[]; maxCursor: number; hasMore: boolean } | null = null
+        try {
+          // 翻页只走签名通道（signerOnly）；签名器内部一次连拉 2 页（batch）
+          // 取 2 不取 3：一次 Python 任务越长，用户点刷新/切号时要排队等它跑完
+          r = await fetchUserPostsOnce(uid, cur, { noCooldown: true, signerOnly: true, batch: 2 })
+        } catch { r = null }
+
+        if (!r) {
+          // 瞬时失败（Python 队列/网络）→ 退避重试，不要一次就放弃：
+          // 否则用户看到的就是“永远停在 30 条”
+          failStreak++
+          if (failStreak > 3) break
+          await sleep(4000 * failStreak)
+          if (token !== bgPullToken) return
+          continue
+        }
+        failStreak = 0
+        batches++
+
+        const base = worksCache.videos
+        const seen = new Set(base.map((v) => v.aweme_id))
+        const add = r.videos.filter((v) => v.aweme_id && !seen.has(v.aweme_id))
+        if (add.length > 0) worksCache.videos = base.concat(add)
+        const prevCursor = cur
+        worksCache.cursor = r.maxCursor
+        worksCache.hasMore = r.hasMore === true
+        if (lastAwemeCount > 0) worksCache.totalCount = lastAwemeCount
+        setBgLoaded(worksCache.videos.length)
+        flushUI()
+        saveLastList()
+
+        if (r.videos.length === 0) {
+          // 空页不一定是“到底”（可能是瞬时限流）：连续两次空页、或游标没前进才停
+          emptyStreak++
+          if (emptyStreak >= 2 || r.maxCursor === prevCursor) {
+            worksCache.hasMore = false
+            setHasMore(false)
+            break
+          }
+          cur = r.maxCursor || prevCursor
+          await sleep(4000)
+          continue
+        }
+        emptyStreak = 0
+        if (r.hasMore !== true) break
+        cur = r.maxCursor
+        if (cur === prevCursor) break   // 游标没前进 = 服务端在原地打转，别死循环
+        // 降频：Python.run 是串行队列，拉得太密会把前台请求（首屏/刷新）挤到超时
+        await sleep(800)
+      }
+    } finally {
+      // 只有“自己还是当前后台”才推 UI，否则切号后会把旧状态盖到新列表上
+      if (token === bgPullToken) flushUI()
+      bgPullBusy = false
+      if (token === bgPullToken) setBgLoading(false)
+      const p = bgPending
+      bgPending = null
+      if (p && p.token === bgPullToken) pullRestInBackground(p.uid, p.cursor, p.token)
     }
   }
 
@@ -2741,8 +3241,43 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     // 同一用户：有缓存就不动 —— 切标签页 / 进详情返回都不重拉。
     // ⚠️ 例外：Cookie 变过（刚去设置页「获取 Cookie」登录过）必须重拉 ——
     // 登录前接口只给公开作品，登录后才多出未公开的那些（实测一次 4 条 → 8 条）。
-    if (worksCache.uid === activeUid && worksCache.videos.length > 0 && cookieSignature() === worksCache.cookieSig) return
+    if (worksCache.uid === activeUid && worksCache.videos.length > 0 && cookieSignature() === worksCache.cookieSig) {
+      // 命缓存但是上次没翻完（退出 App / 切走时中断）→ 继续在后台补齐，不重拉首屏
+      if (worksCache.hasMore && !bgPullBusy) {
+        setBgLoaded(worksCache.videos.length)
+        pullRestInBackground(activeUid, worksCache.cursor, bgPullToken)
+      }
+      return
+    }
     doLoadVideos(true, activeUid)
+  }, [isActive])
+
+  // 历史数据被分享页“空作者”清空过 → 首页打开时补一次当前用户的昵称/头像
+  useEffect(() => {
+    if (!isActive) return
+    const uid = loadSecUid()
+    if (!uid) return
+    const saved = loadSavedUsers().find((u) => u.id === uid)
+    if (saved?.nickname && saved?.avatar) return
+    fetchUserProfile(uid).then((p) => {
+      if (!p) return
+      const cur = loadSavedUsers().find((u) => u.id === uid)
+      if (cur) {
+        saveUser({
+          ...cur,
+          ...(p.nickname ? { nickname: p.nickname } : {}),
+          ...(p.avatar ? { avatar: p.avatar } : {}),
+        })
+      }
+      if (worksCache.uid === uid || worksCache.uid === "") {
+        const nn = worksCache.userInfo.nickname || p.nickname || ""
+        const av = worksCache.userInfo.avatar || p.avatar || ""
+        if (nn || av) {
+          worksCache.userInfo = { nickname: nn, avatar: av }
+          setUserInfo(worksCache.userInfo)
+        }
+      }
+    }).catch(() => { })
   }, [isActive])
 
   // Home Tab 是常驻实例（切走/切回不会重建，改代码也不会热更新 → 长按 Home 图标 Reload）。
@@ -2759,9 +3294,13 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
           const cur = Storage.get<string>(KEY_COOKIE) || ""
           if (cur !== lastCookie) { lastCookie = cur; doLoadVideos(true) }
         } else if (event === "reselected") {
-          // 再点一次 Home：只在「还有下一页」时续拉一页（便宜）；
-          // 不能因为有未公开作品就整轮 reset（aweme_count 含私密作品，永远大于可拉取数）
-          if (worksCache.hasMore) doLoadVideos(false)
+          // 再点一次 Home：后台已经在续拉就别插手；否则有下一页就续拉一页（便宜）
+          if (!bgLoading && !bgPullBusy && worksCache.hasMore) doLoadVideos(false)
+        } else if (event === "deselected") {
+          // 切到别的 Tab：立即作废后台续拉（否则它会一直占着 Python 串行队列，
+          // 用户去设置页/回来刷新时首屏请求会被挤到超时 → 降级分享页 → 只剩 15 条）
+          bgPullToken++
+          bgPending = null
         }
       })
     } catch { off = null }
@@ -2790,8 +3329,10 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   // ⚠️ 2026-10-17 真机实测：接口返回的条目数会少于 aweme_count（实测 4 vs 7）。
   // 差的那些是未公开作品（仅自己可见/朋友可见），服务端只对真实登录会话放出。
   // 所以「已加载全部作品」不能硬编码，必须拿总数对比。
-  const listComplete = lastListSource === "signer" && !lastPartialError && (totalCount === 0 || videos.length >= totalCount)
-  const listShort = lastListSource === "signer" && !listComplete && (totalCount > videos.length || !!lastPartialError)
+  // ⚠️ 底部提示只在「确实没拿全」时出现（用户 2026-11-01 反馈：8 条全出来了还在提示「仅显示最近 8 条」）
+  // 总数未知（totalCount=0，比如只走了分享页）且 hasMore=false → 完全没有“缺”的证据，宁可不说话
+  const listComplete = totalCount > 0 && videos.length >= totalCount
+  const listShort = totalCount > 0 && videos.length < totalCount
 
   return (
     <NavigationStack>
@@ -2850,12 +3391,14 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                 <VStack padding={12} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 10 }} spacing={8} alignment="leading">
                   <Text font="caption" bold>💡 建议</Text>
                   <Text font="caption" foregroundStyle="secondaryLabel">登录抖音后会自动获取 Cookie，作品列表才能完整（含仅自己可见的作品）。</Text>
-                  <Button
-                    title="获取 Cookie"
-                    systemImage="person.crop.circle.badge.checkmark"
-                    buttonStyle="borderedProminent"
-                    action={() => { Navigation.present(<DouyinLoginView onDone={() => { doLoadVideos(true) }} />) }}
-                  />
+                  <HStack spacing={8} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                    <Button
+                      title="获取 Cookie"
+                      systemImage="person.crop.circle.badge.checkmark"
+                      buttonStyle="borderedProminent"
+                      action={() => { Navigation.present(<DouyinLoginView onDone={() => { doLoadVideos(true) }} />) }}
+                    />
+                  </HStack>
                 </VStack>
               ) : null}
             </VStack>
@@ -2881,8 +3424,16 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
             <VStack padding={{ horizontal: 12 }} spacing={16}>
               {gridContent}
               {hasMore ? (
-                <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
-                  {loadingMore ? (
+                <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center" spacing={6}>
+                  {bgLoading ? (
+                    <VStack spacing={6} frame={{ maxWidth: "infinity" }} alignment="center">
+                      <HStack spacing={8}>
+                        <ProgressView />
+                        <Text font="caption" foregroundStyle="secondaryLabel">后台加载中… 已 {bgLoaded} 条</Text>
+                      </HStack>
+                      <Text font="caption2" foregroundStyle="tertiaryLabel">可以正常滑动/播放，剩下的会自动补齐</Text>
+                    </VStack>
+                  ) : loadingMore ? (
                     <HStack spacing={8}><ProgressView /><Text font="caption" foregroundStyle="secondaryLabel">加载更多...</Text></HStack>
                   ) : (
                     <Button action={() => doLoadVideos(false)}>
@@ -2894,62 +3445,26 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                   )}
                 </VStack>
               ) : videos.length > 0 ? (
-                listComplete ? (
-                  <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
-                    <Text font="caption" foregroundStyle="tertiaryLabel">已加载全部作品</Text>
-                  </VStack>
-                ) : listShort ? (
-                  <VStack padding={14} spacing={10} frame={{ maxWidth: "infinity" }} alignment="leading">
+                listShort ? (
+                  // 只陈述事实，不断言“登录后就能看到”（用户 2026-11-01 反馈：明明登录了还在提示重新登录）。
+                  // aweme_count 是作者主页显示的总数，包含作者自己设为私密的作品：
+                  // 只要你不是作者本人，登录了自己也照样看不到。另外图文笔记不走移动端列表接口。
+                  <VStack padding={14} spacing={8} frame={{ maxWidth: "infinity" }} alignment="leading">
                     <HStack spacing={6} frame={{ maxWidth: "infinity" }}>
-                      <Image systemName={lastPartialError ? "exclamationmark.triangle.fill" : "eye.slash"} font="caption" foregroundStyle={lastPartialError ? "systemRed" : "systemOrange"} />
-                      <Text font="subheadline" bold frame={{ maxWidth: "infinity", alignment: "leading" }}>
-                        {lastPartialError ? `已加载 ${videos.length} 条，分页请求失败` : `已显示 ${videos.length} / 共 ${totalCount} 条`}
+                      <Image systemName="info.circle" font="caption" foregroundStyle="tertiaryLabel" />
+                      <Text font="subheadline" frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                        已显示 {videos.length} / 共 {totalCount} 条
                       </Text>
                     </HStack>
-                    <Text font="caption2" foregroundStyle="secondaryLabel" lineLimit={4} frame={{ maxWidth: "infinity", alignment: "leading" }}>
-                      {lastPartialError
-                        ? `其中一页没拉到（${lastPartialError}），点「重试」重新加载。`
-                        : `还有 ${totalCount - videos.length} 条属于「仅自己可见 / 朋友可见」，服务端只对真实登录会话放出——当前登录已失效。`}
+                    <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={5} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                      差的 {totalCount - videos.length} 条不会出现在列表里：可能是作者设为「仅自己可见 / 朋友可见」的作品（只有作者本人能看到），也可能是图文笔记（移动端列表接口不返回）。
                     </Text>
-                    <HStack spacing={8} frame={{ maxWidth: "infinity", alignment: "leading" }}>
-                      <Button
-                        title="重新登录"
-                        systemImage="person.crop.circle.badge.checkmark"
-                        buttonStyle="borderedProminent"
-                        action={() => { Navigation.present(<DouyinLoginView onDone={() => { doLoadVideos(true) }} />) }}
-                      />
-                      <Button
-                        title="重试"
-                        systemImage="arrow.clockwise"
-                        buttonStyle="bordered"
-                        action={() => { doLoadVideos(true) }}
-                      />
-                    </HStack>
                   </VStack>
-                ) : (
-                  <VStack padding={{ vertical: 14 }} spacing={10} frame={{ maxWidth: "infinity" }} alignment="center">
-                  <Text font="caption" foregroundStyle="secondaryLabel">
-                    仅显示最近 {videos.length} 条
-                  </Text>
-                  <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={2}>
-                    抖音目前对匿名读取只放出第一页（接口一律返空，带签名也一样）；登录后即可拿完整列表
-                  </Text>
-                  <HStack spacing={10}>
-                    <Button action={() => { doLoadVideos(true) }}>
-                      <HStack padding={{ horizontal: 14, vertical: 8 }} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 8 }} spacing={6}>
-                        <Image systemName="arrow.clockwise" font="caption" />
-                        <Text font="subheadline">重试</Text>
-                      </HStack>
-                    </Button>
-                    <Button action={() => { try { Safari.openURL(`https://www.douyin.com/user/${secUid}`) } catch {} }}>
-                      <HStack padding={{ horizontal: 14, vertical: 8 }} background="secondarySystemBackground" clipShape={{ type: "rect", cornerRadius: 8 }} spacing={6}>
-                        <Image systemName="safari" font="caption" />
-                        <Text font="subheadline">看全部</Text>
-                      </HStack>
-                    </Button>
-                  </HStack>
-                </VStack>
-                )
+                ) : listComplete ? (
+                  <VStack padding={{ vertical: 16 }} frame={{ maxWidth: "infinity" }} alignment="center">
+                    <Text font="caption" foregroundStyle="tertiaryLabel">已加载全部 {videos.length} 条</Text>
+                  </VStack>
+                ) : null
               ) : null}
             </VStack>
           </Section>
@@ -3061,6 +3576,33 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
   const [savedInfo, setSavedInfo] = useState<SavedUser | null>(() => loadCurrentSavedUser())
   const [savedUsers, setSavedUsers] = useState<SavedUser[]>(() => loadSavedUsers())
   const [currentUid, setCurrentUid] = useState(() => loadSecUid())
+  // 抖音号点击复制后的“已复制”反馈（1.5s 自动复位）
+  const [copiedId, setCopiedId] = useState(false)
+  // iCloud 同步
+  const [syncOn, setSyncOn] = useState(() => icloudSyncOn())
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncStat, setSyncStat] = useState<SyncStatus | null>(() => loadSyncStatus())
+  const [cloudReady] = useState(() => icloudReady())
+  const syncTitle = !cloudReady
+    ? "iCloud 不可用"
+    : !syncOn
+      ? "已关闭同步"
+      : syncBusy
+        ? "同步中…"
+        : syncStat?.result === "ok"
+          ? "已同步"
+          : syncStat?.result === "error"
+            ? "同步失败"
+            : "尚未同步"
+  const syncDetail = !cloudReady
+    ? "在系统设置里登录 iCloud 并允许 Scripting 使用"
+    : !syncOn
+      ? "打开后会把已保存用户与观看历史合并到 iCloud"
+      : syncStat?.result === "ok"
+        ? `${syncStat.users} 个用户 / ${syncStat.history} 条历史 · ${new Date(syncStat.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+        : syncStat?.result === "error"
+          ? (syncStat.detail || "读写 iCloud 文件失败")
+          : "打开设置页会自动同步一次"
 
   function refreshSavedUsers() {
     const users = loadSavedUsers()
@@ -3072,7 +3614,7 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
       if (found) {
         setSavedInfo(found)
         // 缺资料时异步获取
-        if (!found.totalFavorited || !found.shortId || !found.signature || !found.ipLocation) {
+        if (!found.totalFavorited || !found.shortId || !found.signature || !found.ipLocation || !found.nickname || !found.avatar) {
           fetchUserProfile(uid).then((profile) => {
             if (profile) {
               const all = loadSavedUsers().map((u) => u.id === uid ? {
@@ -3118,10 +3660,41 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
         }).catch(() => {})
       }
     } else { setSavedInfo(null) }
+    // 顺带补齐其他已保存用户里缺昵称/头像的（历史上被分享页“空作者”污染过）。
+    // 一次最多 8 个、每个间隔 300ms，避免瞬间打满免签资料接口。
+    void (async () => {
+      const miss = loadSavedUsers().filter((u) => u.id !== uid && (!u.nickname || !u.avatar)).slice(0, 8)
+      if (miss.length === 0) return
+      let changed = false
+      for (const u of miss) {
+        try {
+          const p = await fetchUserProfile(u.id)
+          if (!p) continue
+          const cur = loadSavedUsers().find((x) => x.id === u.id)
+          if (!cur) continue
+          if ((p.nickname && !cur.nickname) || (p.avatar && !cur.avatar)) {
+            saveUser({
+              ...cur,
+              ...(p.nickname ? { nickname: p.nickname } : {}),
+              ...(p.avatar ? { avatar: p.avatar } : {}),
+              ...(p.shortId ? { shortId: p.shortId } : {}),
+            })
+            changed = true
+          }
+        } catch { }
+        await sleep(300)
+      }
+      if (changed) setSavedUsers(loadSavedUsers())
+    })()
   }
 
   useEffect(() => {
-    if (isActive) refreshSavedUsers()
+    if (!isActive) return
+    // 每次打开设置页：先与 iCloud 双向合并一次，再刷新界面
+    if (icloudSyncOn()) {
+      try { setSyncStat(syncWithCloud()) } catch { }
+    }
+    refreshSavedUsers()
   }, [isActive])
 
   // 检查 Cookie 状态
@@ -3245,7 +3818,29 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
                   {savedInfo.avatar ? <Image imageUrl={savedInfo.avatar} resizable scaleToFill frame={{ width: 56, height: 56 }} clipShape={{ type: "rect", cornerRadius: 28 }} /> : <VStack frame={{ width: 56, height: 56 }} background="systemGray4" clipShape={{ type: "rect", cornerRadius: 28 }} alignment="center"><Image systemName="person.fill" font="title2" foregroundStyle="tertiaryLabel" /></VStack>}
                   <VStack spacing={2} alignment="leading">
                     <Text font="title3" bold>{savedInfo.nickname || "抖音用户"}</Text>
-                    {savedInfo.shortId ? <Text font="subheadline" foregroundStyle="secondaryLabel">抖音号: {savedInfo.shortId}</Text> : null}
+                    {savedInfo.shortId ? (
+                      <HStack
+                        spacing={5}
+                        padding={{ vertical: 3, horizontal: 4 }}
+                        contentShape="rect"
+                        onTapGesture={() => {
+                          const v = savedInfo.shortId || ""
+                          if (!v) return
+                          try { HapticFeedback.selection() } catch { }
+                          try { Pasteboard.setString(v).catch(() => { }) } catch { }
+                          setCopiedId(true)
+                          setTimeout(() => setCopiedId(false), 1500)
+                        }}
+                      >
+                        <Text font="subheadline" foregroundStyle="secondaryLabel">抖音号: {savedInfo.shortId}</Text>
+                        <Image
+                          systemName={copiedId ? "checkmark.circle.fill" : "doc.on.doc"}
+                          font="caption2"
+                          foregroundStyle={copiedId ? "systemGreen" : "tertiaryLabel"}
+                        />
+                        {copiedId ? <Text font="caption2" foregroundStyle="systemGreen">已复制</Text> : null}
+                      </HStack>
+                    ) : null}
                   </VStack>
                 </HStack>
                 {(savedInfo.totalFavorited || savedInfo.followingCount || savedInfo.followerCount) ? (
@@ -3344,6 +3939,56 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
           </VStack>
         </Section>
 
+        <Section title="iCloud 同步">
+          {!cloudReady ? (
+            <VStack spacing={4} alignment="leading" padding={{ vertical: 4 }} frame={{ maxWidth: "infinity" }}>
+              <Text font="body">iCloud 不可用</Text>
+              <Text font="caption" foregroundStyle="secondaryLabel">在系统设置里登录 iCloud 并允许 Scripting 使用，才能跨设备同步。</Text>
+            </VStack>
+          ) : (
+            <VStack spacing={12} frame={{ maxWidth: "infinity" }}>
+              <Toggle
+                title="同步已保存用户与观看历史"
+                systemImage="icloud"
+                value={syncOn}
+                onChanged={(v: boolean) => {
+                  setSyncOn(v)
+                  setIcloudSyncOn(v)
+                  if (v) {
+                    try { setSyncStat(syncWithCloud()) } catch { }
+                    refreshSavedUsers()
+                  }
+                }}
+              />
+              <HStack spacing={10} frame={{ maxWidth: "infinity" }} alignment="center">
+                <Image
+                  systemName={syncStat?.result === "ok" ? "checkmark.icloud" : "icloud.slash"}
+                  font="subheadline"
+                  foregroundStyle={syncStat?.result === "ok" ? "systemGreen" : "secondaryLabel"}
+                />
+                <VStack spacing={2} alignment="leading" frame={{ maxWidth: "infinity" }}>
+                  <Text font="subheadline">{syncTitle}</Text>
+                  <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={3}>{syncDetail}</Text>
+                </VStack>
+                <Spacer />
+                <Button
+                  title={syncBusy ? "同步中…" : "立即同步"}
+                  buttonStyle="bordered"
+                  disabled={syncBusy || !syncOn}
+                  action={() => {
+                    setSyncBusy(true)
+                    setTimeout(() => {
+                      try { setSyncStat(syncWithCloud()) } catch { }
+                      setSyncBusy(false)
+                      refreshSavedUsers()
+                    }, 30)
+                  }}
+                />
+              </HStack>
+            </VStack>
+          )}
+        </Section>
+
         <Section title={`已保存用户（${savedUsers.length}）`}>
           {savedUsers.length === 0 ? (
             <Text font="caption" foregroundStyle="secondaryLabel">暂无已保存的用户</Text>
@@ -3396,6 +4041,131 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
 // ─── 主入口 ───
 // ─── 版本更新说明（新版本首次打开时以底部 Sheet 展示） ───
 const UPDATE_NOTES: { version: string; date: string; items: string[] }[] = [
+  {
+    version: "1.0.51",
+    date: "2026-11-02",
+    items: [
+      "新增：iCloud 同步——已保存的用户与观看历史自动跨设备同步",
+      "新增：设置页可以看同步状态、手动立即同步、随时关闭",
+      "优化：同步采用双向合并（两边都保留），不会用这台设备覆盖另一台",
+      "优化：去掉设置里的诊断页（平时用不上，占地方）",
+    ],
+  },
+  {
+    version: "1.0.50",
+    date: "2026-11-02",
+    items: [
+      "修复：顶部会冒出「分页只走签名通道」这类技术文案，现在分页失败完全不打扰你",
+      "修复：作品停在 30 条不再往下出——分页失败会自己隔几秒重试，不再一次就放弃",
+      "优化：打开 App 立刻显示上次的作品，不再每次都白等 Python 启动",
+      "优化：同一个账号刷新时不再清空列表再重画",
+    ],
+  },
+  {
+    version: "1.0.49",
+    date: "2026-11-02",
+    items: [
+      "优化：后台补页时一次连拉 2 页，作品多的账号补全快四分之一",
+      "优化：翻页结果按作品 ID 去重，重复内容不会进列表",
+      "修复：分页中途某页失败时，已拉到的页不再被整体丢弃",
+      "优化：删掉底部永不出现的「分页失败」提示分支",
+      "优化：打开首页时不再先闪一下「暂无作品」",
+    ],
+  },
+  {
+    version: "1.0.48",
+    date: "2026-11-02",
+    items: [
+      "优化：后台补页时每 3 页才刷新一次列表，作品多时滑动更稳",
+      "优化：播放地址探活结果缓存 10 分钟，重复点开不再每次多等一个往返",
+      "优化：签名用的设备画像固定（之前每页随机换机，容易被风控盯上）",
+      "优化：切回旧账号时若快照里昵称/头像是空的，自动回退到已保存资料",
+    ],
+  },
+  {
+    version: "1.0.47",
+    date: "2026-11-02",
+    items: [
+      "修复：只拿到第一页就提示「已显示 30 / 共 155，差的都是私密作品」——分页请求失败被误判成已到末页",
+      "优化：翻页只走签名通道（分享页只支持首页），失败保留「加载更多」并自动重试一次",
+    ],
+  },
+  {
+    version: "1.0.46",
+    date: "2026-11-02",
+    items: [
+      "修复：昵称/头像偶发丢失（已保存用户变「未命名」、标题变「抖音作品」、切换面板显示 sec_uid）",
+      "修复：底部一直挂着「加载更多」——现在点一次就会自动补到完，服务端给空页时也会正确结束",
+      "优化：冷启动先显示已保存的昵称/头像，不再先闪一下「抖音作品」",
+    ],
+  },
+  {
+    version: "1.0.45",
+    date: "2026-11-01",
+    items: [
+      "新增：设置页「当前用户」里的抖音号可点击复制（有「已复制」提示）",
+      "优化：Cookie 状态行不再显示被截断的昵称",
+    ],
+  },
+  {
+    version: "1.0.44",
+    date: "2026-11-01",
+    items: [
+      "修复：已登录时仍提示「重新登录后即可看到」（实际差的可能是作者的私密作品或图文笔记，登录也看不到）",
+      "优化：底部只如实说明差几条及可能原因，不再给没用的「重新登录」按钮",
+    ],
+  },
+  {
+    version: "1.0.43",
+    date: "2026-11-01",
+    items: [
+      "优化：切换账号时首屏更快（不再同步续拉多余页，剩余作品交给后台补）",
+      "优化：切回看过的账号时立即显示上次列表（30 分钟内），不再重新等",
+    ],
+  },
+  {
+    version: "1.0.42",
+    date: "2026-11-01",
+    items: [
+      "修复：作品已经全部显示时，底部仍提示「仅显示最近 N 条」",
+      "优化：底部只在实际缺作品时提示；去掉了没用的「看全部」按钮",
+    ],
+  },
+  {
+    version: "1.0.41",
+    date: "2026-11-01",
+    items: [
+      "修复：登录着却只显示最近 15 条（后台续拉把签名请求队列堵满，首屏请求排队超时后降级到了分享页）",
+      "优化：后台续拉降频，切到其他页面立即暂停，且永远给前台请求让路",
+      "优化：请求超时后暂停签名通道 90 秒，避免连续刷新把队列越堆越多",
+      "修复：底部提示区分「没登录」与「签名通道这次没成功」",
+    ],
+  },
+  {
+    version: "1.0.40",
+    date: "2026-11-01",
+    items: [
+      "新增：切换用户后首屏先上屏，剩下的作品在后台逐页自动补齐（底部显示进度，不卡界面）",
+      "新增：启动 App 时若上次没翻完，会自动继续补齐",
+      "优化：底部文案区分「后台加载中」与「手动加载更多」",
+    ],
+  },
+  {
+    version: "1.0.39",
+    date: "2026-11-01",
+    items: [
+      "修复：诊断里作品数量看着像没拉全——现在写明「首屏 X 条 / 共 Y 条，是否还有更多」，并新增「拉取全部作品」逐页拉完再对比总数",
+    ],
+  },
+  {
+    version: "1.0.38",
+    date: "2026-11-01",
+    items: [
+      "新增：诊断页（登录态 / 签名器 / 作品列表 / 播放直链 四项分层自检），设置页与加载失败提示里都能进",
+      "修复：历史记录里的旧视频点开黑屏——播放前自动检测直链，过期就重新获取",
+      "优化：网页端签名（a_bogus）与浏览器逐字节一致（官方 4 条基准全过）",
+    ],
+  },
   {
     version: "1.0.37",
     date: "2026-10-17",

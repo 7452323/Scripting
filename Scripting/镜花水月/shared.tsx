@@ -2,8 +2,9 @@ import {
   Navigation, Script, TabView, Tab,
   VStack, HStack, Text, Button, TextField, Toggle,
   Spacer, ScrollView, Image, LazyVGrid, ProgressView,
-  useState, useEffect, useMemo, useCallback, fetch, VideoPlayer,
-  NavigationStack, List, Section, GeometryReader, WebView,
+  useState, useEffect, useMemo, useCallback, useRef, fetch, VideoPlayer,
+  NavigationStack, List, Section, GeometryReader, WebView, Menu, Group,
+  ZStack, VideoPlaybackView, Rectangle, LazyVStack, Circle,
 } from "scripting"
 import { abogusFromQuery } from "./abogus"
 
@@ -18,7 +19,7 @@ const KEY_UIFID = "douyin_uifid"
 const KEY_DEVICE_ID = "douyin_device_id"
 const KEY_INSTALL_ID = "douyin_install_id"
 const KEY_SEEN_VERSION = "seen_version"
-const SCRIPT_VERSION = "1.0.51"
+const SCRIPT_VERSION = "3.9"
 
 // 运行时全局对象
 declare const screen: { width: number; height: number; scale: number } | undefined
@@ -36,7 +37,7 @@ interface ImageInfo {
   videoUrl?: string  // 动图视频 URL（API 中部分图片带此字段）
 }
 interface HistoryItem extends VideoInfo { viewed_at: number }
-interface SavedUser { id: string; nickname: string; avatar: string; savedAt: number; shortId?: string; totalFavorited?: number; followingCount?: number; followerCount?: number; signature?: string; ipLocation?: string; gender?: number }
+interface SavedUser { id: string; nickname: string; avatar: string; savedAt: number; shortId?: string; totalFavorited?: number; followingCount?: number; followerCount?: number; signature?: string; ipLocation?: string; gender?: number; awemeCount?: number }
 
 const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 const ANDROID_UA = "Mozilla/5.0 (Android; Mobile; rv:54.0) Gecko/54.0 Firefox/54.0"
@@ -44,7 +45,11 @@ const ANDROID_UA = "Mozilla/5.0 (Android; Mobile; rv:54.0) Gecko/54.0 Firefox/54
 const DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 // secsdk VM 字符串表常量（project douyin_web id 34），与账号无关
 const SECSDK_SALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
-const POST_PAGE_SIZE = 30
+// ⚠️ 每页只能 20 条（2026-11-03 真机实测）：
+//   count=20 → 单页 ~1.68MB，3.6–4.2s 稳定返回；
+//   count=25 / count=30 → 服务端把连接“吊住”，read 超时实测 22s / 65s / 100s+ 都出现过。
+//   一页卡住就会把 Python 串行队列堵死 → 表现为「加载半天不出作品」「只加载到几十条」。
+const POST_PAGE_SIZE = 20
 
 // ─── 移动端免签通道（2026-10-12 真机实测结论） ───
 // 与 web 通道不同：只要 iid 用真的 install_id，
@@ -165,8 +170,31 @@ function safeJSONParse(text: string | null | undefined): unknown | null {
   return null
 }
 
-/** 优先选 CDN 直链（douyinvod / tos），避开需要重定向的 play 接口 */
-function pickBestPlayUrl(urlList: string[]): string {
+/**
+ * 容噪 JSON 解析：Python 运行时会把 stderr 噪音（sandbox_extension_consume failed 之类）
+ * 混进 stdout，位置可能在 JSON 前也可能在后。
+ * 做法：从第一个 { 开始，从尾部往前逐个右花括号试，直到解析成功。
+ */
+function parseLooseJSON(raw: string): any {
+  const first = safeJSONParse(raw)
+  if (first) return first
+  const start = raw.indexOf("{")
+  if (start < 0) return null
+  let end = raw.length
+  for (let i = 0; i < 6; i++) {
+    const sub = raw.slice(start, end)
+    try {
+      const v = JSON.parse(sub)
+      if (v && typeof v === "object") return v
+    } catch { }
+    const at = raw.lastIndexOf("}", end - 1)
+    if (at <= start) break
+    end = at + 1
+  }
+  return null
+}
+
+/** 优先选 CDN 直链（douyinvod / tos），避开需要重定向的 play 接口 */function pickBestPlayUrl(urlList: string[]): string {
   if (!urlList || urlList.length === 0) return ""
   const direct = urlList.find((u) => u.includes("douyinvod.com") || u.includes("/video/tos/"))
   return direct || urlList[urlList.length - 1] || urlList[0] || ""
@@ -869,6 +897,76 @@ async function downloadWithProgress(
 }
 
 /**
+ * 内联下载：解析无水印 → 下载 → 存相册。进度回调 0~1，不弹 ShareProgressView。
+ * 返回 { ok, message }；ok 时 message = "下载完成"。
+ */
+async function downloadToPhotos(
+  video: VideoInfo,
+  isImage: boolean,
+  imageIndex: number,
+  onProgress: (ratio: number) => void
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const imgInfo = video.images[imageIndex]
+    const originalUrl = isImage ? (imgInfo?.url || "") : video.play_url
+    const imageVideoUrl = isImage ? (imgInfo?.videoUrl || "") : ""
+
+    // 解析无水印（失败就退回原始地址）
+    let targetUrl = originalUrl
+    try {
+      const result = await extractNoWatermarkUrl(video, isImage, imageIndex)
+      if (result.url) targetUrl = result.url
+    } catch { }
+
+    const isAnimatedImage = isImage && imageVideoUrl.length > 0
+    const downloadUrl = isAnimatedImage ? imageVideoUrl : targetUrl
+    if (!downloadUrl) return { ok: false, message: "没有可下载地址" }
+
+    onProgress(0.04)
+    const data = await downloadWithProgress(downloadUrl, { "User-Agent": MOBILE_UA, "Referer": "https://www.douyin.com/" }, (d, t) => {
+      onProgress(t > 0 ? 0.04 + (d / t) * 0.86 : 0.04)
+    })
+    if (!data || data.size === 0) return { ok: false, message: "下载数据为空" }
+
+    onProgress(0.92)
+
+    const isGif = !isAnimatedImage && isGifUrl(downloadUrl)
+    const actuallyGif = isGif || isGifData(data)
+    const ext = isAnimatedImage ? "mp4" : (actuallyGif ? "gif" : (isImage ? "jpg" : "mp4"))
+    const fileName = `${video.aweme_id}${isAnimatedImage ? "_video" : (actuallyGif ? "_gif" : "")}.${ext}`
+
+    let savedOk = false
+    if (isAnimatedImage) {
+      const docPath = FileManager.documentsDirectory + fileName
+      await writeDataFile(docPath, data)
+      try {
+        const pair = await createLivePhotoPairFromVideoPath(docPath, `${video.aweme_id}_livephoto_${Date.now()}`)
+        await Photos.saveLivePhoto({ imagePath: pair.imagePath, videoPath: pair.videoPath, shouldMoveFile: true })
+        savedOk = true
+        try { await FileManager.remove(docPath) } catch { }
+      } catch {
+        savedOk = await Photos.saveVideo(docPath, { fileName, shouldMoveFile: true })
+      }
+    } else if (actuallyGif) {
+      savedOk = await Photos.savePhoto(data, { fileName })
+    } else if (isImage) {
+      const docPath = FileManager.documentsDirectory + fileName
+      await writeDataFile(docPath, data)
+      savedOk = await Photos.savePhoto(docPath, { fileName, shouldMoveFile: true })
+    } else {
+      const docPath = FileManager.documentsDirectory + fileName
+      await writeDataFile(docPath, data)
+      savedOk = await Photos.saveVideo(docPath, { fileName, shouldMoveFile: true })
+    }
+
+    onProgress(1)
+    return savedOk ? { ok: true, message: "下载完成" } : { ok: false, message: "保存失败（可能没给相册权限）" }
+  } catch (e) {
+    return { ok: false, message: "下载失败：" + String((e as any)?.message || e).slice(0, 60) }
+  }
+}
+
+/**
  * 展示保存/分享选择界面
  */
 async function shareVideo(video: VideoInfo, isImage: boolean, animIdx?: number) {
@@ -1137,70 +1235,131 @@ function ShareProgressView({ video, shareUrl, isImage, originalUrl, imageVideoUr
   )}
 
 // ─── 动图/图片单页组件 ──—
+// ─── 播放页（v3.6） ───
 /**
- * 播放页「下载」按钮的位置偏移。
- * 位置：右下角、AVKit 进度条的上方（底部那一行被 AVKit 自己的全屏 / PiP 占着）。
- * 实机若看着不理想，只调这两个数字即可。
+ * 播放页 = 「一条作品」的舞台（VideoStage）+ 外层信息流壳（VideoPreviewView）。
+ *  · 内核：VideoPlaybackController + VideoPlaybackView（自绘控件，不用它自带的控制条）
+ *  · 交互：单击暂停 / 长按 2 倍速 / **上下滑切换作品**（走到底自动续拉一页）
+ *  · 呈现：fullScreenCover（sheet 的下拉手势会和上下滑打架 —— 用户 2026-11-15 要求 A+B 都做，
+ *    所以改成全屏+右上角 ✕ 关闭，下滑不再是「关闭」而是「上一条」）
  */
-const PLAYER_DOWNLOAD_TRAILING_INSET = 18
-const PLAYER_DOWNLOAD_BOTTOM_INSET = 56
+const PLAYER_RAIL_TRAILING_INSET = 10
+const PLAYER_RAIL_BOTTOM_INSET = 96
+/** 播放页请求头：抖音 CDN 有 Referer 白名单，缺了直接 403 */
+const PLAYER_HEADERS = { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" }
 
-function FloatingIconButton({ systemName, onTap }: { systemName: string; onTap: () => void }) {
-  // 图片页专用：压在照片上需要底板，所以用系统毛玻璃 + 语义色 label（跟随系统深浅色）
+/** 秒 → m:ss */
+function fmtClock(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return "0:00"
+  const total = Math.floor(sec)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s < 10 ? "0" : ""}${s}`
+}
+
+/** 圆形百分比进度环（点击「保存」后按钮图标变成这个） */
+function DownloadProgressRing({ ratio }: { ratio: number }) {
+  const pct = Math.round(Math.min(1, Math.max(0, ratio)) * 100)
   return (
-    <Button action={onTap}>
-      <VStack frame={{ width: 44, height: 44 }} alignment="center" background="ultraThinMaterial" clipShape={{ type: "rect", cornerRadius: 22 }}>
-        <Image systemName={systemName} font="title3" foregroundStyle="label" />
+    <ZStack frame={{ width: 30, height: 30 }}>
+      <Circle
+        stroke={{ shapeStyle: "white", strokeStyle: { lineWidth: 2.5, lineCap: "round" } }}
+        trim={{ from: 0, to: 1 }}
+        frame={{ width: 30, height: 30 }}
+        opacity={0.3}
+      />
+      <Circle
+        stroke={{ shapeStyle: "white", strokeStyle: { lineWidth: 2.5, lineCap: "round" } }}
+        trim={{ from: 0, to: Math.min(1, Math.max(0, ratio)) }}
+        frame={{ width: 30, height: 30 }}
+        rotationEffect={-90}
+      />
+      <Text font={9} foregroundStyle="white" monospacedDigit>{pct}</Text>
+    </ZStack>
+  )
+}
+
+/**
+ * 播放页操作栏按钮：裸白字形 + 可选数值，不加底板。
+ * （用户 2026-10-12 定调：播放器上的按钮要和系统控件一样是裸字形，别套毛玻璃圆底）
+ * `progress` 有值时，图标区换成圆形百分比进度环（下载中）。
+ */
+function PlayerRailButton({ systemName, label, onTap, busy, active, tint, progress }: {
+  systemName: string
+  label?: string
+  onTap?: () => void
+  busy?: boolean
+  active?: boolean
+  tint?: string
+  progress?: number
+}) {
+  const glyphColor = tint || (active ? "systemYellow" : "white")
+  return (
+    <Button action={() => { if (onTap) onTap() }}>
+      <VStack spacing={2} padding={{ vertical: 5, horizontal: 6 }} contentShape="rect">
+        {busy
+          ? <ProgressView tint="white" frame={{ width: 26, height: 26 }} />
+          : progress !== undefined && progress >= 0
+            ? <DownloadProgressRing ratio={progress} />
+            : <Image systemName={systemName} font={25} foregroundStyle={glyphColor as any} shadow={{ color: "black", radius: 4 }} />}
+        {label ? <Text font={11} foregroundStyle="white" shadow={{ color: "black", radius: 3 }} lineLimit={1}>{label}</Text> : null}
       </VStack>
     </Button>
   )
 }
 
-/**
- * 播放器上的按钮：与 AVKit 自带按钮同款 —— **裸白色字形**，不加底板。
- * （之前用毛玻璃圆底，与 AVKit 的裸字形按钮放一起就“格格不入”—— 用户 2026-10-12 指出）
- * padding 是留给触控的（字形 ≈20pt + 10pt 内边距 ≈ iOS 的 44pt 触控区）。
- */
-function PlayerGlyphButton({ systemName, onTap }: { systemName: string; onTap: () => void }) {
-  return (
-    <Button action={onTap}>
-      <Image systemName={systemName} font="title3" foregroundStyle="white" padding={10} />
-    </Button>
-  )
+// ─── 本地收藏（点赞做不了，见下方 fetchComments 的注释） ───
+const KEY_FAVORITES = "douyin_favorites"
+function loadFavoriteIds(): string[] {
+  try {
+    const raw = Storage.get<string>(KEY_FAVORITES) || ""
+    const arr = raw ? JSON.parse(raw) : []
+    return Array.isArray(arr) ? arr.map((x: any) => String(x)) : []
+  } catch { return [] }
+}
+function isFavorited(id: string): boolean {
+  return !!id && loadFavoriteIds().indexOf(id) >= 0
+}
+/** 返回切换后的状态 */
+function toggleFavorite(id: string): boolean {
+  if (!id) return false
+  const list = loadFavoriteIds()
+  const i = list.indexOf(id)
+  if (i >= 0) { list.splice(i, 1); Storage.set(KEY_FAVORITES, JSON.stringify(list)); return false }
+  list.unshift(id)
+  Storage.set(KEY_FAVORITES, JSON.stringify(list.slice(0, 2000)))
+  return true
 }
 
-function ImagePageOverlay({ badgeText, pageWidth, pageHeight, onExport, loading }: {
+function ImagePageOverlay({ badgeText, pageWidth, pageHeight, loading }: {
   badgeText: string
   pageWidth: number
   pageHeight: number
-  onExport: () => void
   loading: boolean
 }) {
   return (
-    <VStack frame={{ width: pageWidth, height: pageHeight }} alignment="center" padding={{ horizontal: 16, bottom: 14 }}>
+    <VStack frame={{ width: pageWidth, height: pageHeight }} spacing={0}>
+      <Spacer />
       {loading ? (
-        <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} alignment="center">
-          <ProgressView foregroundStyle="white" />
+        <VStack frame={{ maxWidth: "infinity" }} spacing={0}>
+          <ProgressView tint="white" />
         </VStack>
-      ) : <Spacer />}
-      <HStack frame={{ maxWidth: "infinity" }} spacing={12}>
-        <HStack padding={{ horizontal: 10, vertical: 5 }} background="ultraThinMaterial" clipShape={{ type: "rect", cornerRadius: 8 }}>
-          <Text font="caption2" foregroundStyle="label">{badgeText}</Text>
-        </HStack>
+      ) : null}
+      {/* 页码抬到 152pt：下面被播放页的文案占着；导出按钮已挪到右侧操作栏，和视频一致 */}
+      <HStack spacing={10} frame={{ maxWidth: "infinity" }} padding={{ leading: 16, trailing: 16, bottom: 152 }}>
+        <Text font="caption2" bold foregroundStyle="white" shadow={{ color: "black", radius: 3 }}>{badgeText}</Text>
         <Spacer />
-        <FloatingIconButton systemName="square.and.arrow.down" onTap={onExport} />
       </HStack>
     </VStack>
   )
 }
 
-function AnimatedImagePage({ imgInfo, pageWidth, pageHeight, index, total, onExport }: {
+function AnimatedImagePage({ imgInfo, pageWidth, pageHeight, index, total }: {
   imgInfo: ImageInfo
   pageWidth: number
   pageHeight: number
   index: number
   total: number
-  onExport: () => void
 }) {
   const [player, setPlayer] = useState<AVPlayer | null>(null)
   const [videoError, setVideoError] = useState(false)
@@ -1217,18 +1376,18 @@ function AnimatedImagePage({ imgInfo, pageWidth, pageHeight, index, total, onExp
     }
     p.onError = () => setVideoError(true)
     const sourceSet = p.setSource(imgInfo.videoUrl, {
-      headers: { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" }
+      headers: { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" },
     })
     if (!sourceSet) setVideoError(true)
     SharedAudioSession.setCategory('playback', [])
     SharedAudioSession.setActive(true)
     return () => {
-      try { p.stop(); p.dispose() } catch {}
+      try { p.stop(); p.dispose() } catch { }
     }
   }, [])
 
   const badgeText = isAnimatedVideo ? "动图" : `${index + 1}/${total}`
-  const overlay = <ImagePageOverlay badgeText={badgeText} pageWidth={pageWidth} pageHeight={pageHeight} onExport={onExport} loading={isAnimatedVideo && !player && !videoError} />
+  const overlay = <ImagePageOverlay badgeText={badgeText} pageWidth={pageWidth} pageHeight={pageHeight} loading={isAnimatedVideo && !player && !videoError} />
 
   if (isAnimatedVideo && player && !videoError) {
     return (
@@ -1253,105 +1412,870 @@ function AnimatedImagePage({ imgInfo, pageWidth, pageHeight, index, total, onExp
   )
 }
 
-// ─── 视频播放 ───
-function VideoPreviewView({ video }: { video: VideoInfo }) {
-  // 不放关闭按钮：播放页是 sheet，下滑即可关闭（用户 2026-10-12 定）
-  const [player, setPlayer] = useState<AVPlayer | null>(null)
-  const [error, setError] = useState("")
-  const isImagePost = video.images.length > 0
+// ─── 本地视频缓存（自己存文件，AVPlayer/新内核都直接播本地路径） ───
+const VIDEO_CACHE_DIR = FileManager.appGroupDocumentsDirectory + "/dy-video-cache"
 
-  useEffect(() => {
-    if (isImagePost) return
-    if (!video.play_url) { setError("无可播放地址"); return }
-    const p = new AVPlayer()
-    p.onReadyToPlay = () => {
-      setPlayer(p)
-      p.play()
-    }
-    p.onError = () => { setError("播放失败") }
-    const sourceSet = p.setSource(video.play_url, {
-      headers: { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" }
-    })
-    if (!sourceSet) setError("播放地址加载失败")
-    SharedAudioSession.setCategory('playback', [])
-    SharedAudioSession.setActive(true)
-    // 收起（最小化）先暂停：原生播放器不挂 React 树，不处理的话后台会一直出声
-    let unregister: (() => void) | undefined
-    try {
-      const reg = (Script as any).onMinimize
-      if (typeof reg === "function") unregister = reg(() => { try { p.pause() } catch {} })
-    } catch {}
-    return () => {
-      try { p.pause(); p.stop(); p.dispose() } catch {}
-      try { if (unregister) unregister() } catch {}
-    }
-  }, [])
+function cachedVideoPath(v: VideoInfo): string {
+  if (!v.aweme_id) return ""
+  try {
+    const p = `${VIDEO_CACHE_DIR}/${v.aweme_id}.mp4`
+    return FileManager.existsSync(p) ? p : ""
+  } catch { return "" }
+}
 
+function removeCachedVideo(v: VideoInfo): boolean {
+  try {
+    const p = `${VIDEO_CACHE_DIR}/${v.aweme_id}.mp4`
+    if (!FileManager.existsSync(p)) return false
+    FileManager.removeSync(p)
+    return true
+  } catch { return false }
+}
+
+/** 缓存目录现状（文件数 + 总字节）：只在需要时调，不要在 render 里扫盘 */
+function videoCacheStats(): { files: number; bytes: number } {
+  try {
+    if (!FileManager.existsSync(VIDEO_CACHE_DIR)) return { files: 0, bytes: 0 }
+    const entries = FileManager.readDirectorySync(VIDEO_CACHE_DIR)
+    let files = 0
+    let bytes = 0
+    for (const e of entries) {
+      const p = e.indexOf("/") >= 0 ? e : `${VIDEO_CACHE_DIR}/${e}`
+      try {
+        if (!FileManager.isFileSync(p)) continue
+        files++
+        bytes += Number(FileManager.statSync(p)?.size) || 0
+      } catch { }
+    }
+    return { files, bytes }
+  } catch { return { files: 0, bytes: 0 } }
+}
+
+/** 一键清空缓存目录，返回删掉的文件数 */
+function clearVideoCache(): number {
+  try {
+    if (!FileManager.existsSync(VIDEO_CACHE_DIR)) return 0
+    const entries = FileManager.readDirectorySync(VIDEO_CACHE_DIR)
+    let removed = 0
+    for (const e of entries) {
+      const p = e.indexOf("/") >= 0 ? e : `${VIDEO_CACHE_DIR}/${e}`
+      try { FileManager.removeSync(p); removed++ } catch { }
+    }
+    return removed
+  } catch { return 0 }
+}
+
+// ─── 评论面板（页内浮层，不用 sheet：sheet 套 sheet 会打架） ───
+function relativeTime(sec: number): string {
+  if (!sec) return ""
+  const now = Date.now() / 1000
+  const d = Math.max(0, now - sec)
+  if (d < 60) return "刚刚"
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`
+  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`
+  if (d < 86400 * 30) return `${Math.floor(d / 86400)} 天前`
+  const date = new Date(sec * 1000)
+  return `${date.getMonth() + 1}月${date.getDate()}日`
+}
+
+function CommentRow({ c }: { c: CommentInfo }) {
   return (
-    <GeometryReader>{({ size: { width, height } }) => (
-      <VStack frame={{ width, height }} background="black">
-        {/**
-         * 控件层只留一个「下载」：
-         *   · 位置：右下角、AVKit 进度条上方（底部那一行被 AVKit 的全屏/PiP 占着）
-         *   · 样式：裸白色字形，与 AVKit 自带按钮一致
-         *   · 浮层只占一个小角，屏幕主体完全归 AVKit，原生控件能正常吃到触摸
-         */}
-        <VStack
-          frame={{ width, height }}
-          background="black"
-          overlay={{
-            alignment: "bottomTrailing",
-            content: (
-              <VStack padding={{ trailing: PLAYER_DOWNLOAD_TRAILING_INSET, bottom: PLAYER_DOWNLOAD_BOTTOM_INSET }}>
-                {/* 图文作品的下载在每页底部（带页码，导出才不错图），这里只给视频作品 */}
-                {!isImagePost && player ? (
-                  <PlayerGlyphButton systemName="arrow.down.circle" onTap={() => shareVideo(video, false)} />
-                ) : null}
-              </VStack>
-            ),
-          }}
-        >
-          {isImagePost ? (
-            <ScrollView axes="horizontal" scrollTargetBehavior="paging" frame={{ width, height }}>
-              <HStack spacing={0} frame={{ height }}>
-                {video.images.map((imgInfo, i) => (
-                  <AnimatedImagePage
-                    key={i}
-                    imgInfo={imgInfo}
-                    pageWidth={width}
-                    pageHeight={height}
-                    index={i}
-                    total={video.images.length}
-                    onExport={() => shareVideo(video, true, i)}
-                  />
-                ))}
-              </HStack>
-            </ScrollView>
-          ) : player ? (
-            <VideoPlayer player={player} frame={{ width, height }} />
-          ) : error ? (
-            <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} alignment="center" spacing={12}>
-              <Image systemName="exclamationmark.triangle.fill" font="largeTitle" foregroundStyle="white" opacity={0.6} />
-              <Text foregroundStyle="white" opacity={0.6}>{error}</Text>
-            </VStack>
-          ) : (
-            <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} alignment="center">
-              {video.cover ? (
-                <Image imageUrl={video.cover} resizable aspectRatio={{ value: null, contentMode: 'fit' }} frame={{ maxWidth: "infinity", maxHeight: "infinity" }} opacity={0.3} allowsHitTesting={false} />
-              ) : null}
-              <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} alignment="center" allowsHitTesting={false}>
-                <ProgressView foregroundStyle="white" />
-              </VStack>
-            </VStack>
-          )}
+    <HStack spacing={10} frame={{ maxWidth: "infinity" }} padding={{ vertical: 8 }}>
+      {c.avatar ? (
+        <Image imageUrl={c.avatar} resizable scaleToFill frame={{ width: 32, height: 32 }}
+          clipShape={{ type: "rect", cornerRadius: 16 }} />
+      ) : (
+        <VStack frame={{ width: 32, height: 32 }} background="white" opacity={0.16}
+          clipShape={{ type: "rect", cornerRadius: 16 }}>
+          <Spacer />
         </VStack>
+      )}
+      <VStack spacing={3} alignment="leading" frame={{ maxWidth: "infinity", alignment: "leading" }}>
+        <Text font={12} foregroundStyle="white" opacity={0.6} lineLimit={1}>{c.nickname || "抖音用户"}</Text>
+        <Text font={14} foregroundStyle="white" lineSpacing={2}>{c.text}</Text>
+        <HStack spacing={10}>
+          <Text font={11} foregroundStyle="white" opacity={0.45}>{relativeTime(c.create_time)}</Text>
+          {c.ip_label ? <Text font={11} foregroundStyle="white" opacity={0.45}>{c.ip_label}</Text> : null}
+          {c.reply_count > 0 ? <Text font={11} foregroundStyle="white" opacity={0.45}>{c.reply_count} 条回复</Text> : null}
+          <Spacer />
+          {c.digg_count > 0 ? <Text font={11} foregroundStyle="white" opacity={0.45}>{formatCount(c.digg_count)} 赞</Text> : null}
+        </HStack>
       </VStack>
-    )}</GeometryReader>
+    </HStack>
   )
 }
 
+function CommentsPanel({ video, height, onClose }: { video: VideoInfo; height: number; onClose: () => void }) {
+  const [items, setItems] = useState<CommentInfo[]>([])
+  const [busy, setBusy] = useState(true)
+  const [err, setErr] = useState("")
+  const [cursor, setCursor] = useState(0)
+  const [hasMore, setHasMore] = useState(true)
+  const loadingRef = useRef(false)
+
+  const load = async (reset: boolean) => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    if (reset) { setBusy(true); setErr("") }
+    try {
+      const r = await fetchComments(video.aweme_id, reset ? 0 : cursor, 20)
+      setItems((prev) => {
+        if (reset) return r.comments
+        const seen = new Set(prev.map((c) => c.cid))
+        return prev.concat(r.comments.filter((c) => !seen.has(c.cid)))
+      })
+      setCursor(r.cursor)
+      setHasMore(r.hasMore && r.comments.length > 0)
+      setErr("")
+    } catch (e) {
+      if (reset) setErr("评论加载失败（" + String((e as any)?.message || e).slice(0, 40) + "）")
+      else setHasMore(false)
+    }
+    setBusy(false)
+    loadingRef.current = false
+  }
+
+  useEffect(() => { void load(true) }, [])
+
+  return (
+    <VStack frame={{ maxWidth: "infinity", height }} background="black" spacing={0}
+      clipShape={{ type: "rect", cornerRadius: 18 }}>
+      <HStack frame={{ maxWidth: "infinity" }} padding={{ horizontal: 14, vertical: 12 }}>
+        <Text font="headline" bold foregroundStyle="white">
+          {video.comment_count > 0 ? `${formatCount(video.comment_count)} 条评论` : "评论"}
+        </Text>
+        <Spacer />
+        <Button action={onClose}>
+          <Image systemName="xmark.circle.fill" font={22} foregroundStyle="white" opacity={0.55} padding={4} contentShape="rect" />
+        </Button>
+      </HStack>
+      <ScrollView frame={{ maxWidth: "infinity", maxHeight: "infinity" }}>
+        <LazyVStack frame={{ maxWidth: "infinity" }} padding={{ horizontal: 14, bottom: 30 }} alignment="leading">
+          {err ? <Text font={13} foregroundStyle="white" opacity={0.6} padding={{ vertical: 20 }}>{err}</Text> : null}
+          {items.map((c) => <CommentRow key={c.cid} c={c} />)}
+          {busy ? <ProgressView tint="white" padding={{ vertical: 16 }} /> : null}
+          {!busy && hasMore && items.length > 0 ? (
+            <Button title="加载更多" action={() => { void load(false) }} padding={{ vertical: 12 }} />
+          ) : null}
+          {!busy && !hasMore && items.length === 0 && !err ? (
+            <Text font={13} foregroundStyle="white" opacity={0.5} padding={{ vertical: 24 }}>还没有评论</Text>
+          ) : null}
+        </LazyVStack>
+      </ScrollView>
+    </VStack>
+  )
+}
+
+// ─── 单条作品的舞台 ───
+function VideoStage({ video, onClose, onSwipeUp, onSwipeDown }: {
+  video: VideoInfo
+  onClose: () => void
+  onSwipeUp: () => void
+  onSwipeDown: () => void
+}) {
+  const isImagePost = video.images.length > 0
+
+  const ctlRef = useRef<VideoPlaybackController | null>(null)
+  const [mounted, setMounted] = useState(false)
+  const [state, setState] = useState<VideoPlaybackState>("loading")
+  const [pos, setPos] = useState(0)
+  const [dur, setDur] = useState(video.duration || 0)
+  const [errMsg, setErrMsg] = useState("")
+  const [boost, setBoost] = useState(false)
+  const [cached, setCached] = useState(() => !!cachedVideoPath(video))
+  const [cacheBusy, setCacheBusy] = useState(false)
+  const [faved, setFaved] = useState(() => isFavorited(video.aweme_id))
+  const [hint, setHint] = useState("")
+  const [showComments, setShowComments] = useState(false)
+  // 图文作品当前看到的第几页（右侧「保存」按钮保存当前页）
+  const [imagePage, setImagePage] = useState(0)
+  // 内联下载进度（点击「保存」后按钮变圆形百分比）
+  const [dlBusy, setDlBusy] = useState(false)
+  const [dlRatio, setDlRatio] = useState(0)
+  const [pipPossible, setPipPossible] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const hintTimer = useRef<any>(null)
+  const boostRef = useRef(false)
+  // 播放错误自动恢复：记录断点 + 已重试次数（新内核 native 后端读网络流中途断流会报 EIO，要自己重连）
+  const lastPosRef = useRef(0)
+  const retryRef = useRef(0)
+
+  const showHint = (text: string) => {
+    setHint(text)
+    try { if (hintTimer.current) clearTimeout(hintTimer.current) } catch { }
+    hintTimer.current = setTimeout(() => setHint(""), 1900)
+  }
+  useEffect(() => () => { try { if (hintTimer.current) clearTimeout(hintTimer.current) } catch { } }, [])
+
+  // ── 播放内核 ──
+  useEffect(() => {
+    if (isImagePost) return
+    if (!video.play_url) { setState("failed"); setErrMsg("没有播放地址（作品可能已删除，或地址取不到）"); return }
+
+    let disposed = false
+    const c = new VideoPlaybackController()
+    ctlRef.current = c
+    const offs: Array<() => void> = []
+    let lastNowPlaying = 0
+    // 每次重新加载（attempt 变化）都重置断点与重试计数
+    retryRef.current = 0
+    lastPosRef.current = 0
+    setMounted(false)
+    setState("loading")
+    setErrMsg("")
+    setPos(0)
+
+    const keep = (off?: () => void) => { if (typeof off === "function") offs.push(off) }
+    const pushNowPlaying = (elapsed: number, duration: number) => {
+      try {
+        MediaPlayer.nowPlayingInfo = {
+          title: (video.desc || "抖音作品").slice(0, 60),
+          artist: video.author_nickname || "镜花水月",
+          playbackDuration: duration || 0,
+          elapsedPlaybackTime: Math.max(0, Math.floor(elapsed)),
+          playbackRate: 1,
+        }
+      } catch { }
+    }
+
+    keep(c.on("state", (s) => { if (!disposed) setState(s.state) }))
+    keep(c.on("ready", (s) => {
+      if (disposed) return
+      // 源准备成功 = 首次成功或错误恢复成功 → 重试计数清零
+      retryRef.current = 0
+      setState(s.state)
+      if (s.duration) setDur(s.duration)
+      // 画面层现在才挂：必须在源准备好之后
+      setMounted(true)
+      pushNowPlaying(0, s.duration || 0)
+      try {
+        MediaPlayer.setAvailableCommands(["play", "pause"])
+        MediaPlayer.commandHandler = (cmd: string) => {
+          if (disposed) return
+          try {
+            if (cmd === "play") { void c.play() } else if (cmd === "pause") { c.pause() }
+          } catch { }
+        }
+      } catch { }
+      void (async () => { try { await c.play() } catch { } })()
+    }))
+    keep(c.on("progress", (s) => {
+      if (disposed) return
+      lastPosRef.current = s.position
+      setPos(s.position)
+      if (s.duration) setDur(s.duration)
+      if (Date.now() - lastNowPlaying > 1000) {
+        lastNowPlaying = Date.now()
+        pushNowPlaying(s.position, s.duration || 0)
+      }
+    }))
+    // 循环播放（新内核没有 numberOfLoops）
+    keep(c.on("ended", () => {
+      if (disposed) return
+      void (async () => { try { await c.seek(0); await c.play() } catch { } })()
+    }))
+    // 播放出错：网络/IO 类错误自动从断点重连（最多 3 次），致命错误（403/404/无音轨）才判死
+    keep(c.on("error", (e) => {
+      if (disposed) return
+      const msg = String((e as any)?.message || "")
+      if (isRecoverablePlaybackError(msg) && retryRef.current < 3) {
+        retryRef.current++
+        const resumeAt = lastPosRef.current || 0
+        void (async () => {
+          try {
+            setState("loading")
+            try { await c.stop() } catch { }
+            const local = cachedVideoPath(video)
+            await c.open(local || video.play_url, local ? { backend: "native" } : { backend: "native", headers: PLAYER_HEADERS })
+            if (disposed) return
+            if (resumeAt > 0.3) { try { await c.seek(resumeAt) } catch { } }
+            try { await c.play() } catch { }
+          } catch (e2) {
+            if (disposed) return
+            setState("failed")
+            setErrMsg(friendlyPlaybackError((e2 as any)?.message || msg))
+          }
+        })()
+        return
+      }
+      setState("failed")
+      setErrMsg(friendlyPlaybackError(msg))
+    }))
+
+    const openOnce = async (src: string, isLocal: boolean) => {
+      await c.open(src, isLocal ? { backend: "native" } : { backend: "native", headers: PLAYER_HEADERS })
+    }
+
+    void (async () => {
+      try { SharedAudioSession.setCategory('playback', []) } catch { }
+      try { await SharedAudioSession.setActive(true) } catch { }
+      const local = cachedVideoPath(video)
+      try {
+        await openOnce(local || video.play_url, !!local)
+        return
+      } catch (e) {
+        if (disposed) return
+        if (local) { setState("failed"); setErrMsg("本地缓存文件无法播放，删掉缓存后重试"); return }
+        // 直链过期（约 2–4 小时）→ 用 detail 接口重取一次
+        setState("loading")
+        const fresh = await refreshPlayUrl(video)
+        if (disposed) return
+        if (!fresh) { setState("failed"); setErrMsg(friendlyPlaybackError((e as any)?.message)); return }
+        try {
+          await openOnce(fresh, false)
+        } catch (e2) {
+          if (disposed) return
+          setState("failed")
+          setErrMsg(friendlyPlaybackError((e2 as any)?.message || String(e2)))
+        }
+      }
+    })()
+
+    // 收起（最小化）先暂停；画中画正在播时不能暂停——会把小窗一起停掉
+    let unregister: (() => void) | undefined
+    try {
+      const reg = (Script as any).onMinimize
+      if (typeof reg === "function") unregister = reg(() => {
+        try {
+          if (c.getPictureInPictureState().active) return
+        } catch { }
+        try { c.pause() } catch { }
+      })
+    } catch { }
+
+    return () => {
+      disposed = true
+      for (const off of offs) { try { off() } catch { } }
+      try { if (unregister) unregister() } catch { }
+      try { MediaPlayer.commandHandler = null } catch { }
+      try { MediaPlayer.nowPlayingInfo = null } catch { }
+      ctlRef.current = null
+      void (async () => { try { c.pause(); await c.dispose() } catch { } })()
+    }
+  }, [attempt])
+
+  // 画中画是否可用：必须在画面层挂载之后再问（否则永远 false）
+  useEffect(() => {
+    if (isImagePost || !mounted) return
+    const c = ctlRef.current
+    if (!c) return
+    const t = setTimeout(() => {
+      try { setPipPossible(!!c.getPictureInPictureState().possible) } catch { }
+    }, 700)
+    return () => { try { clearTimeout(t as any) } catch { } }
+  }, [mounted])
+
+  // 进度轮询：控制器只保证「周期性」progress，为了让进度线跟得上手，再补一个 300ms 轮询
+  useEffect(() => {
+    if (isImagePost) return
+    let lastDur = 0
+    const t = setInterval(() => {
+      const c = ctlRef.current
+      if (!c) return
+      try { lastPosRef.current = c.position; setPos(c.position) } catch { }
+      try {
+        const d = c.duration
+        if (d && Math.abs(d - lastDur) > 0.2) { lastDur = d; setDur(d) }
+      } catch { }
+    }, 300)
+    return () => { try { clearInterval(t as any) } catch { } }
+  }, [])
+
+  // ── 操作 ──
+  const togglePlay = () => {
+    const c = ctlRef.current
+    if (!c) return
+    try {
+      if (state === "playing" || state === "buffering" || state === "seeking") c.pause()
+      else void c.play()
+    } catch { }
+  }
+  const startBoost = () => {
+    const c = ctlRef.current
+    if (!c) return
+    boostRef.current = true
+    try { c.playbackRate = 2; setBoost(true) } catch { boostRef.current = false }
+  }
+  const endBoost = () => {
+    if (!boostRef.current) return
+    boostRef.current = false
+    setBoost(false)
+    const c = ctlRef.current
+    if (!c) return
+    try { c.playbackRate = 1 } catch { }
+  }
+  const seekToFraction = (fraction: number) => {
+    const c = ctlRef.current
+    if (!c || !dur) return
+    const target = Math.min(Math.max(fraction, 0), 0.995) * dur
+    void c.seek(target).catch(() => { })
+  }
+  const togglePip = async () => {
+    const c = ctlRef.current
+    if (!c) return
+    try {
+      const st = c.getPictureInPictureState()
+      if (st.active) { c.stopPictureInPicture(); return }
+      await c.startPictureInPicture()
+    } catch { showHint("画中画启动失败（可先播一下再点）") }
+  }
+  const toggleCache = async () => {
+    if (cacheBusy) return
+    if (cached) {
+      const ok = removeCachedVideo(video)
+      setCached(!ok)
+      showHint(ok ? "已删除本地缓存" : "删除失败")
+      return
+    }
+    if (!video.play_url) { showHint("没有播放地址，无法缓存"); return }
+    setCacheBusy(true)
+    setHint("缓存 0%")
+    try {
+      const data = await downloadWithProgress(video.play_url, PLAYER_HEADERS, (d, t) => {
+        setHint(t > 0 ? `缓存 ${Math.floor((d / t) * 100)}%` : "缓存中…")
+      })
+      try { FileManager.createDirectorySync(VIDEO_CACHE_DIR, true) } catch { }
+      FileManager.writeAsDataSync(`${VIDEO_CACHE_DIR}/${video.aweme_id}.mp4`, data)
+      setCached(true)
+      showHint("已缓存到本地，下次直接播")
+    } catch {
+      showHint("缓存失败")
+    }
+    setCacheBusy(false)
+  }
+  const onFavorite = () => {
+    const now = toggleFavorite(video.aweme_id)
+    setFaved(now)
+    showHint(now ? "已收藏到本地" : "已取消收藏")
+  }
+  // 内联下载（不跳 ShareProgressView）：按钮变圆形百分比，完成后提示「下载完成」
+  const startDownload = async () => {
+    if (dlBusy) return
+    setDlBusy(true)
+    setDlRatio(0)
+    try {
+      const r = await downloadToPhotos(video, isImagePost, isImagePost ? imagePage : 0, (ratio) => setDlRatio(ratio))
+      if (r.ok) showHint("下载完成")
+      else showHint(r.message || "下载失败")
+    } finally {
+      setDlBusy(false)
+      setDlRatio(0)
+    }
+  }
+
+  const busy = !isImagePost && (state === "loading" || state === "buffering" || state === "seeking")
+  const paused = !isImagePost && (state === "paused" || state === "ended")
+  const failed = !isImagePost && state === "failed"
+  const progress = dur > 0 ? Math.min(1, Math.max(0, pos / dur)) : 0
+
+  return (
+    <GeometryReader>{({ size: { width, height } }) => {
+      const barW = Math.max(80, width - 172)
+      return (
+        <ZStack frame={{ width, height }} background="black">
+
+          {/* ① 画面：视频 / 图文分页 / 封面占位 */}
+          <VStack frame={{ width, height }} alignment="center">
+            {isImagePost ? (
+              <ScrollView
+                axes="horizontal"
+                scrollTargetBehavior="paging"
+                frame={{ width, height }}
+                scrollPosition={{ value: null, onChanged: (v) => {
+                  const off = typeof v === "number" ? v : 0
+                  const page = Math.round(off / Math.max(1, width))
+                  if (page >= 0 && page < video.images.length) setImagePage(page)
+                } }}
+              >
+                <HStack spacing={0} frame={{ height }}>
+                  {video.images.map((imgInfo, i) => (
+                    <AnimatedImagePage
+                      key={i}
+                      imgInfo={imgInfo}
+                      pageWidth={width}
+                      pageHeight={height}
+                      index={i}
+                      total={video.images.length}
+                    />
+                  ))}
+                </HStack>
+              </ScrollView>
+            ) : mounted && ctlRef.current ? (
+              <VideoPlaybackView
+                controller={ctlRef.current}
+                videoGravity="resizeAspect"
+                frame={{ width, height }}
+              />
+            ) : (
+              <VStack frame={{ width, height }} alignment="center">
+                {video.cover ? (
+                  <Image imageUrl={video.cover} resizable aspectRatio={{ value: null, contentMode: "fit" }}
+                    frame={{ width, height }} opacity={0.45} allowsHitTesting={false} />
+                ) : null}
+              </VStack>
+            )}
+          </VStack>
+
+          {/* ② 手势层：单击暂停 / 长按 2× / 上下滑切换作品 */}
+          {isImagePost ? null : (
+            <VStack
+              frame={{ width, height }}
+              background="black"
+              opacity={0.001}
+              contentShape="rect"
+              allowsHitTesting={!showComments}
+              onTapGesture={() => togglePlay()}
+              onLongPressGesture={{
+                minDuration: 420,
+                perform: () => startBoost(),
+                onPressingChanged: (pressing: boolean) => { if (!pressing) endBoost() },
+              }}
+              onDragGesture={{
+                minDistance: 14,
+                onEnded: (g: any) => {
+                  const dx = Number(g?.translation?.width || 0)
+                  const dy = Number(g?.translation?.height || 0)
+                  if (Math.abs(dy) < 56 || Math.abs(dy) < Math.abs(dx)) return
+                  if (dy < 0) onSwipeUp()
+                  else onSwipeDown()
+                },
+              }}
+            />
+          )}
+
+          {/* ③ 顶部渐变 */}
+          <VStack frame={{ width, height }}>
+            <Rectangle
+              fill={{ colors: ["black", "clear"], startPoint: "top", endPoint: "bottom" }}
+              frame={{ maxWidth: "infinity", height: 170 }}
+              opacity={0.62}
+              allowsHitTesting={false}
+            />
+            <Spacer />
+          </VStack>
+
+          {/* ④ 顶部：作者 + 画中画 + 关闭 */}
+          <VStack frame={{ width, height }}>
+            <VStack frame={{ maxWidth: "infinity" }} padding={{ top: 10, leading: 14, trailing: 4 }}>
+              <HStack spacing={8} frame={{ maxWidth: "infinity" }}>
+                {video.author_avatar ? (
+                  <Image imageUrl={video.author_avatar} resizable scaleToFill frame={{ width: 32, height: 32 }}
+                    clipShape={{ type: "rect", cornerRadius: 16 }} />
+                ) : (
+                  <VStack frame={{ width: 32, height: 32 }} alignment="center" background="white" opacity={0.18}
+                    clipShape={{ type: "rect", cornerRadius: 16 }}>
+                    <Image systemName="person.fill" font="caption" foregroundStyle="white" />
+                  </VStack>
+                )}
+                <VStack spacing={1} alignment="leading" frame={{ maxWidth: "infinity", alignment: "leading" }}>
+                  <Text font="subheadline" bold foregroundStyle="white" lineLimit={1}
+                    shadow={{ color: "black", radius: 3 }}>{video.author_nickname || "抖音作品"}</Text>
+                  {video.author_ip_location ? (
+                    <Text font={11} foregroundStyle="white" opacity={0.75} lineLimit={1}
+                      shadow={{ color: "black", radius: 3 }}>{video.author_ip_location}</Text>
+                  ) : null}
+                </VStack>
+                {pipPossible ? <PlayerRailButton systemName="pip" onTap={() => { void togglePip() }} /> : null}
+                <PlayerRailButton systemName="xmark" onTap={onClose} />
+              </HStack>
+            </VStack>
+            <Spacer />
+          </VStack>
+
+          {/* ⑤ 右侧操作栏 */}
+          <VStack frame={{ width, height }}>
+            <Spacer />
+            <HStack frame={{ maxWidth: "infinity" }}
+              padding={{ trailing: PLAYER_RAIL_TRAILING_INSET, bottom: PLAYER_RAIL_BOTTOM_INSET }}>
+              <Spacer />
+              <VStack spacing={8}>
+                <PlayerRailButton
+                  systemName={faved ? "heart.fill" : "heart"}
+                  label={faved ? "已收藏" : formatCount(video.digg_count)}
+                  tint={faved ? "systemRed" : undefined}
+                  onTap={onFavorite}
+                />
+                <PlayerRailButton
+                  systemName="bubble.right.fill"
+                  label={video.comment_count > 0 ? formatCount(video.comment_count) : "评论"}
+                  onTap={() => setShowComments(true)}
+                />
+                <PlayerRailButton systemName="link" label="链接" onTap={() => { copyShareUrl(video); showHint("链接已复制") }} />
+                <PlayerRailButton
+                  systemName="arrow.down.to.line"
+                  label="保存"
+                  progress={dlBusy ? dlRatio : undefined}
+                  onTap={() => { void startDownload() }}
+                />
+                {isImagePost ? null : (
+                  <PlayerRailButton
+                    systemName={cached ? "internaldrive.fill" : "internaldrive"}
+                    label={cached ? "已缓存" : "缓存"}
+                    busy={cacheBusy}
+                    active={cached}
+                    onTap={() => { void toggleCache() }}
+                  />
+                )}
+              </VStack>
+            </HStack>
+          </VStack>
+
+          {/* ⑥ 底部渐变 */}
+          <VStack frame={{ width, height }}>
+            <Spacer />
+            <Rectangle
+              fill={{ colors: ["clear", "black"], startPoint: "top", endPoint: "bottom" }}
+              frame={{ maxWidth: "infinity", height: 240 }}
+              opacity={0.8}
+              allowsHitTesting={false}
+            />
+          </VStack>
+
+          {/* ⑦ 底部：文案 + 进度线 */}
+          <VStack frame={{ width, height }}>
+            <Spacer />
+            <VStack frame={{ maxWidth: "infinity" }} alignment="leading" spacing={8}
+              padding={{ leading: 14, trailing: 74, bottom: 16 }}>
+              {video.desc ? (
+                <Text font="footnote" foregroundStyle="white" lineLimit={3} lineSpacing={2} allowsHitTesting={false}
+                  shadow={{ color: "black", radius: 3 }}>{video.desc}</Text>
+              ) : null}
+              {isImagePost ? (
+                <Text font={11} foregroundStyle="white" opacity={0.72} allowsHitTesting={false}>图文 · {video.images.length} 张，左右滑动查看</Text>
+              ) : (
+                <HStack spacing={8}>
+                  <Text font={11} foregroundStyle="white" opacity={0.85} monospacedDigit>{fmtClock(pos)}</Text>
+                  <VStack
+                    frame={{ width: barW, height: 18 }}
+                    contentShape="rect"
+                    onTapGesture={{ coordinateSpace: "local", perform: (loc: any) => seekToFraction(loc.x / Math.max(1, barW)) }}
+                  >
+                    <VStack
+                      frame={{ width: barW, height: 3 }}
+                      alignment="leading"
+                      background="white"
+                      opacity={0.32}
+                      clipShape={{ type: "rect", cornerRadius: 1.5 }}
+                      overlay={{
+                        alignment: "leading",
+                        content: (
+                          <VStack frame={{ width: Math.max(3, barW * progress), height: 3 }}
+                            background="white" clipShape={{ type: "rect", cornerRadius: 1.5 }} />
+                        ),
+                      }}
+                    />
+                  </VStack>
+                  <Text font={11} foregroundStyle="white" opacity={0.85} monospacedDigit>{fmtClock(dur)}</Text>
+                </HStack>
+              )}
+            </VStack>
+          </VStack>
+
+          {/* ⑧ 中央：缓冲 / 暂停 / 错误 */}
+          <VStack frame={{ width, height }} spacing={10} allowsHitTesting={false}>
+            {busy ? (
+              <HStack spacing={6} padding={{ vertical: 6, horizontal: 10 }} background="black" opacity={0.45}
+                clipShape={{ type: "rect", cornerRadius: 8 }}>
+                <ProgressView tint="white" />
+                <Text font="caption" foregroundStyle="white">缓冲中</Text>
+              </HStack>
+            ) : null}
+            {paused && !busy ? (
+              <Image systemName="play.fill" font={46} foregroundStyle="white" opacity={0.85}
+                shadow={{ color: "black", radius: 6 }} />
+            ) : null}
+            {failed ? (
+              <VStack spacing={6} padding={{ horizontal: 18, vertical: 14 }} background="black" opacity={0.75}
+                clipShape={{ type: "rect", cornerRadius: 14 }}>
+                <Image systemName="exclamationmark.triangle.fill" font="title2" foregroundStyle="orange" />
+                <Text font="footnote" foregroundStyle="white" lineLimit={4} multilineTextAlignment="center"
+                  frame={{ maxWidth: 240 }}>{errMsg || "播放失败"}</Text>
+              </VStack>
+            ) : null}
+            {boost ? (
+              <Text font={12} bold foregroundStyle="white" padding={{ horizontal: 10, vertical: 4 }}
+                background="black" opacity={0.55} clipShape={{ type: "rect", cornerRadius: 8 }}>2× 倍速播放中</Text>
+            ) : null}
+          </VStack>
+
+          {/* ⑨ 失败重试（单独一层，要能点） */}
+          {failed ? (
+            <VStack frame={{ width, height }} spacing={0}>
+              <Spacer />
+              <Button title="重新加载" action={() => setAttempt(attempt + 1)} />
+              <VStack frame={{ height: 170 }} />
+            </VStack>
+          ) : null}
+
+          {/* ⑩ 轻提示 */}
+          {hint ? (
+            <VStack frame={{ width, height, alignment: "bottom" }} spacing={0} allowsHitTesting={false}>
+              <HStack spacing={0} padding={{ horizontal: 12, vertical: 7 }} background="black" opacity={0.6}
+                clipShape={{ type: "rect", cornerRadius: 10 }}>
+                <Text font="caption" foregroundStyle="white" lineLimit={2} multilineTextAlignment="center">{hint}</Text>
+              </HStack>
+              <VStack frame={{ height: 120 }} />
+            </VStack>
+          ) : null}
+
+          {/* ⑪ 评论面板（页内浮层） */}
+          {showComments ? (
+            <VStack frame={{ width, height, alignment: "bottom" }} spacing={0}>
+              <VStack frame={{ maxWidth: "infinity", height: 10 }} background="black" opacity={0.001}
+                onTapGesture={() => setShowComments(false)} />
+              <CommentsPanel video={video} height={Math.min(560, height * 0.62)} onClose={() => setShowComments(false)} />
+            </VStack>
+          ) : null}
+        </ZStack>
+      )
+    }}</GeometryReader>
+  )
+}
+
+/** 滑到底时补一页：复用作品页的缓存游标（不动列表 UI 状态，只把新条目并进缓存） */
+async function feedLoadMore(): Promise<VideoInfo[]> {
+  const secUid = loadSecUid()
+  if (!secUid || !worksCache.hasMore) return []
+  const cursor = worksCache.resumeCursor || worksCache.cursor || 0
+  try {
+    const r = await fetchUserPosts(secUid, cursor, {})
+    const known = new Set(worksCache.videos.map((v) => v.aweme_id))
+    const added = r.videos.filter((v) => v.aweme_id && !known.has(v.aweme_id))
+    if (added.length > 0) worksCache.videos = worksCache.videos.concat(added)
+    worksCache.cursor = r.maxCursor || worksCache.cursor
+    worksCache.resumeCursor = r.maxCursor || worksCache.resumeCursor
+    worksCache.hasMore = r.hasMore
+    saveLastList()
+    return added
+  } catch { return [] }
+}
+
+/** 播放错误转成能看懂的短句（新内核的错误信息是英文的） */
+function friendlyPlaybackError(message?: string): string {
+  const m = String(message || "")
+  if (!m) return "播放失败"
+  if (/403|forbidden/i.test(m)) return "直链已过期（403），重试可自动换新地址"
+  if (/404|not found/i.test(m)) return "地址已失效（404），作品可能被删除"
+  if (/input\/output|i\/o error|eio/i.test(m)) return "网络中断，多次重连失败（点下方「重新加载」重试）"
+  if (/timeout|timed out/i.test(m)) return "网络超时，请检查网络后重试"
+  if (/audio track|no selected audio/i.test(m)) return "该视频没有可用音轨"
+  if (/foreground|background audio/i.test(m)) return "需要在前台播放（或开启后台音频）"
+  return m.slice(0, 80)
+}
+
+/**
+ * 播放错误是否「可恢复」：网络/IO 类（EIO、超时、连接重置）自动重连；
+ * 只有明确的致命错误（403/404/无音轨/格式不支持/受保护）才直接判死。
+ * 抖音 CDN 直链带时效签名，播放中途连接被切断时 AVFoundation 会报
+ * `Input/output error`（EIO）——这是可恢复的，重新 open 建立新连接即可。
+ */
+function isRecoverablePlaybackError(message?: string): boolean {
+  const m = String(message || "").toLowerCase()
+  if (!m) return true
+  if (/403|404|forbidden|not found|no selected audio|audio track|format|unsupported|protected|decoder|license/i.test(m)) return false
+  return true
+}
+
+/** 直链过期后用 detail 接口换一条新地址（取不到就返回空串） */
+async function refreshPlayUrl(video: VideoInfo): Promise<string> {
+  if (!video.aweme_id) return ""
+  try {
+    const detail = await fetchAwemeDetail(video.aweme_id)
+    if (!detail) return ""
+    const info = awemeToVideoInfo(detail)
+    return info.play_url || ""
+  } catch { return "" }
+}
+
+/**
+ * 播放页入口。
+ * `feed` 有值时是「信息流」模式（上下滑切换），没值时只播这一条。
+ */
+export function VideoPreviewView({ video, feed }: {
+  video: VideoInfo
+  feed?: { videos: VideoInfo[]; index: number }
+}) {
+  // 预览（preview_ui）里不在导航栈中，useDismiss 会抛 → 兜一个空实现
+  let dismiss = () => { }
+  try { dismiss = Navigation.useDismiss() } catch { }
+
+  const [list, setList] = useState<VideoInfo[]>(() =>
+    feed && feed.videos.length > 0 ? feed.videos.slice() : [video])
+  const [idx, setIdx] = useState<number>(() =>
+    feed && feed.videos.length > 0 ? Math.max(0, Math.min(feed.index, feed.videos.length - 1)) : 0)
+  const [pullBusy, setPullBusy] = useState(false)
+  const [notice, setNotice] = useState("")
+  const noticeTimer = useRef<any>(null)
+
+  const showNotice = (t: string) => {
+    setNotice(t)
+    try { if (noticeTimer.current) clearTimeout(noticeTimer.current) } catch { }
+    noticeTimer.current = setTimeout(() => setNotice(""), 1600)
+  }
+  useEffect(() => () => { try { if (noticeTimer.current) clearTimeout(noticeTimer.current) } catch { } }, [])
+
+  const current = list[idx] || video
+
+  const goPrev = () => {
+    if (idx > 0) setIdx(idx - 1)
+    else showNotice("已经是第一个作品")
+  }
+  const goNext = async () => {
+    if (idx + 1 < list.length) { setIdx(idx + 1); return }
+    if (pullBusy) return
+    setPullBusy(true)
+    showNotice("正在加载更多…")
+    try {
+      const added = await feedLoadMore()
+      if (added.length > 0) { setList(list.concat(added)); setIdx(idx + 1) }
+      else showNotice("已经是最后一个作品")
+    } finally {
+      setPullBusy(false)
+    }
+  }
+
+  return (
+    <ZStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} background="black">
+      <VideoStage
+        key={current.aweme_id + ":" + idx}
+        video={current}
+        onClose={dismiss}
+        onSwipeUp={() => { void goNext() }}
+        onSwipeDown={goPrev}
+      />
+
+      {/* 位置指示（只在信息流里出现） */}
+      {list.length > 1 ? (
+        <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} spacing={0} allowsHitTesting={false}>
+          <VStack frame={{ height: 52 }} />
+          <Text font={11} foregroundStyle="white" opacity={0.5} shadow={{ color: "black", radius: 2 }}>{idx + 1} / {list.length}</Text>
+          <Spacer />
+        </VStack>
+      ) : null}
+
+      {/* 轻提示（加载更多 / 到第一个） */}
+      {notice ? (
+        <VStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} spacing={0} allowsHitTesting={false}>
+          <Spacer />
+          <HStack spacing={0} padding={{ horizontal: 12, vertical: 6 }} background="black" opacity={0.7}
+            clipShape={{ type: "rect", cornerRadius: 10 }}>
+            <Text font="caption" foregroundStyle="white">{notice}</Text>
+          </HStack>
+          <VStack frame={{ height: 210 }} />
+        </VStack>
+      ) : null}
+    </ZStack>
+  )
+}
+
+
+
+
+
 // ─── 打开视频（防双击） ───
 let _openingVideo = false
+/** 时间窗节流：Navigation.present 可能立即 resolve，锁一放开就连点第二下 → 再叠一层 700ms 窗口 */
+let _lastOpenVideoAt = 0
 // ─── 播放地址探活（CDN 直链带 dy_q/l 时间戳，约 2–4 小时过期后 403） ───
 const CDN_HEADERS = { "User-Agent": MOBILE_UA, Referer: "https://www.douyin.com/" }
 /** 探活结果缓存（url → 探测时间），只缓存“可用”，避免每次打开都多一个网络往返 */
@@ -1378,15 +2302,18 @@ async function isPlayUrlAlive(url: string): Promise<boolean> {
   } catch { return false }
 }
 
-async function openVideo(video: VideoInfo, _idx?: number) {
+async function openVideo(video: VideoInfo, _idx?: number, feedVideos?: VideoInfo[]) {
   if (_openingVideo) return
+  if (Date.now() - _lastOpenVideoAt < 700) return
   _openingVideo = true
+  _lastOpenVideoAt = Date.now()
   try {
     // 分享页通道拿到的条目没有播放地址（图文也没图集 URL）→ 用移动端 detail 接口补一次；
     // 有地址但已过期（历史记录里的旧条目）→ 也要重取，否则点开直接黑屏 / 403
     let v = video
     const probe = v.play_url || v.images.find((i) => i.url)?.url || ""
-    const stale = probe ? !(await isPlayUrlAlive(probe)) : false
+    // 已缓存就不再探活/重取：本地文件不受直链过期影响
+    const stale = probe && !cachedVideoPath(v) ? !(await isPlayUrlAlive(probe)) : false
     const needDetail = !v.play_url || (v.images.length > 0 && !v.images[0]?.url)
     if (v.aweme_id && (needDetail || stale)) {
       try {
@@ -1408,7 +2335,14 @@ async function openVideo(video: VideoInfo, _idx?: number) {
       } catch { /* 补不到就照原样打开，至少封面/标题能看 */ }
     }
     addToHistory(v)
-    await Navigation.present(<VideoPreviewView video={v} />)
+    // 信息流模式：把当前列表一起带进去，播放页里上下滑就能切相邻作品
+    const list = feedVideos && feedVideos.length > 0 ? feedVideos : [v]
+    const start = typeof _idx === "number" && _idx >= 0 && _idx < list.length ? _idx : 0
+    // 用 fullScreen 而不是 sheet：下拉手势要留给「上一条」，不能同时当关闭用
+    await Navigation.present({
+      element: <VideoPreviewView video={list[start] || v} feed={{ videos: list, index: start }} />,
+      modalPresentationStyle: "fullScreen",
+    })
   } finally {
     _openingVideo = false
   }
@@ -2052,8 +2986,21 @@ let lastListSource: "signer" | "share" | "" = ""
 let signerDeadUntil = 0
 /** 超时导致的短暂冷却：Python.run 是串行队列且不能取消，连续重试会越积越多 */
 let signerSlowUntil = 0
-function markSignerDead() { signerDeadUntil = Date.now() + 5 * 60 * 1000 }
-function markSignerSlow() { signerSlowUntil = Date.now() + 90 * 1000 }
+function markSignerDead() { signerDeadUntil = Date.now() + 5 * 60 * 1000 }function markSignerSlow() { signerSlowUntil = Date.now() + 90 * 1000 }
+
+/**
+ * Python 运行时热身（每个进程一次）。
+ * ⚠️ 实测（2026-11-03）：**每个新进程的第一次Python.run 常常丢 stdout** ——
+ *   回来的是运行时自己的一行日志「Transpile JSContext released」（28B，无 JSON），
+ *   白白浪费一次 7s 的接口请求，表现就是「刚打开要等好久才出作品」。
+ *   先发一个 82ms 的空跑把这一下消耗掉。
+ */
+let pythonWarmed = false
+async function ensurePythonWarm() {
+  if (pythonWarmed) return
+  pythonWarmed = true
+  try { await timeoutFetch(Python.run("import sys; sys.stdout.write('warm')"), 10000) } catch { }
+}
 function signerUsable() {
   const now = Date.now()
   if (now < signerDeadUntil || now < signerSlowUntil) return false
@@ -2076,7 +3023,7 @@ function signerUsable() {
  * ⇒ 服务端既不校验「头形态与版本一致」，也不校验 Argus 里的 device_id 与 query 是否一致。
  *   所以维持 `sign_all()`（23.3 形态）即可；免得为了切 38.7 去同步 medusa387 那一堆模块。
  */
-async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batchPages: number = 1): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number; ok: boolean }> {
+async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batchPages: number = 1, count: number = POST_PAGE_SIZE): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number; ok: boolean }> {
   const cookie = (Storage.get<string>(KEY_COOKIE) || "").trim()
   if (!cookie) throw new Error("没有 Cookie")
   const dir = resolvePysignDir()
@@ -2086,7 +3033,6 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
   //    传 Date.now() 时它俩完全不在结果里（时间窗口直接跳过了）。
   //    置顶在前、其余时间降序；若服务端反过来给（历史上出现过），fixOrder() 会整体纠正。
   const effCursor = cursor > 0 ? String(cursor) : "0"
-  const needTotal = cursor <= 0
   const L: string[] = []
   L.push("import sys, json, ssl, time, urllib.request")
   L.push("sys.path.insert(0, " + JSON.stringify(dir) + ")")
@@ -2102,10 +3048,14 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
   L.push("base = {'device_platform':'iphone','aid':'1128','channel':'App%20Store','app_name':'aweme',")
   L.push(" 'version_code':'40.4.0','version_name':'40.4.0','device_type':'iPhone17,3','os_version':'27.0.1',")
   L.push(" 'iid':'7683339722235938341','device_id':'1923489864614387'}")
-  L.push("def call(path, extra, tmo=12):")
+  // call() 的 hard budget：urllib 的 timeout 只管「单次读」，服务端慢慢吐数据时
+  // 单次读不会超时、总时长却能拖到 100s+（2026-11-03 实测）→ 必须自己卡墙钟。
+  // 分块读 + 每块检查剩余时间：超了立刻抛，最多比 budget 多一个读超时（6s）。
+  L.push("def call(path, extra, budget=20):")
   L.push("    p = dict(base); p.update(extra)")
   L.push("    qs = '&'.join('%s=%s' % (k, v) for k, v in p.items())")
   L.push("    url = 'https://api5-normal-c-lq.amemv.com' + path + '?' + qs")
+  L.push("    t0 = time.time()")
   L.push("    h = sign_all(method='GET', url=url, body=b'', cookies=cookie, device=dev)")
   L.push("    req = urllib.request.Request(url)")
   L.push("    for k, v in h.items():")
@@ -2114,8 +3064,15 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
   L.push("    try: req.add_header('Cookie', cookie)")
   L.push("    except Exception: pass")
   L.push("    req.add_header('User-Agent', 'Aweme/404017 CFNetwork/3896.100.1.2.1 Darwin/27.0.0')")
-  L.push("    r = urllib.request.urlopen(req, timeout=tmo, context=ssl._create_unverified_context())")
-  L.push("    return r.read().decode('utf-8', 'ignore')")
+  L.push("    r = urllib.request.urlopen(req, timeout=6, context=ssl._create_unverified_context())")
+  L.push("    buf = []")
+  L.push("    while True:")
+  L.push("        if time.time() - t0 > budget:")
+  L.push("            raise RuntimeError('页面响应太慢（%ss 没收完）' % budget)")
+  L.push("        b = r.read(65536)")
+  L.push("        if not b: break")
+  L.push("        buf.append(b)")
+  L.push("    return b''.join(buf).decode('utf-8', 'ignore')")
   L.push("out = {}")
   L.push("pages = []")
   L.push("cur = " + JSON.stringify(effCursor))
@@ -2123,7 +3080,7 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
   // 逐页调的话 300 条要 11 次启动（≈ 40s）→ 批量后只需 4 次（≈ 15s）。
   L.push("for _i in range(" + String(Math.max(1, batchPages)) + "):")
   L.push("    try:")
-  L.push("        _t = call('/aweme/v1/aweme/post/', {'sec_user_id': " + JSON.stringify(secUid) + ", 'max_cursor': str(cur), 'count': '30', 'publish_video_strategy_type': '2', 'source': '0'})")
+  L.push("        _t = call('/aweme/v1/aweme/post/', {'sec_user_id': " + JSON.stringify(secUid) + ", 'max_cursor': str(cur), 'count': '" + String(count) + "', 'publish_video_strategy_type': '2', 'source': '0'}, 20)")
   L.push("        _j = json.loads(_t)")
   L.push("        pages.append(_j)")
   L.push("        cur = str(_j.get('max_cursor') or 0)")
@@ -2133,26 +3090,27 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
   L.push("        out['err'] = str(e)[:200]")
   L.push("        break")
   L.push("out['pages'] = pages")
-  if (needTotal) {
-    // 作品总数（aweme_count）：用于判断「是不是真的全了」——
-    // 未登录/仅好友可见的作品不会进 post 列表，旧版本却照样写「已加载全部作品」。
-    L.push("try:")
-    L.push("    out['user'] = call('/aweme/v1/user/', {'sec_user_id': " + JSON.stringify(secUid) + "}, 2)")
-    L.push("except Exception:")
-    L.push("    pass")
-  }
+  // ⚠️ 不再在同一进程里调 /aweme/v1/user/ 拿 aweme_count：
+  //    那个接口经常吊死（实测 8s 读超时、tmo=2 时直接把首页拖慢 2s），
+  //    作品总数改用免签的 iesdouyin user/info（TS fetch，~2s，不占 Python 队列）。
   L.push("sys.stdout.write(json.dumps(out))")
-  const res: any = await timeoutFetch(Python.run(L.join("\n")), 30000)
-  const raw = String(res?.output || "")
-  if (!raw) throw new Error("签名器没有输出")
-  // Python 的 stdout 偶尔会被 App 自身的日志混入 → 只取 JSON 主体
+  const src = L.join("\n")
+  await ensurePythonWarm()
+  // Python 输出偶尔整块丢失（典型：每个 App 进程的第一次调用）→ 传输级失败重试一次；
+  // 业务层面的失败（parsed 里带 err）不重试，交给上层退避。
   let parsed: any = null
-  const bi = raw.indexOf("@@B@@"), ei = raw.lastIndexOf("@@E@@")
-  try { parsed = safeJSONParse(raw) } catch {
-    try { parsed = safeJSONParse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)) } catch { parsed = null }
+  let raw = ""
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    const res: any = await timeoutFetch(Python.run(src), 45000)
+    raw = String(res?.output || "")
+    if (raw) {
+      parsed = parseLooseJSON(raw)
+      const bi = raw.indexOf("@@B@@"), ei = raw.lastIndexOf("@@E@@")
+      if (!parsed && bi >= 0 && ei > bi) parsed = parseLooseJSON(raw.slice(bi + 5, ei))
+    }
+    if (!parsed && attempt === 0) await sleep(250)
   }
-  if (bi >= 0 && ei > bi) { try { parsed = safeJSONParse(raw.slice(bi + 5, ei)) } catch { /* keep */ } }
-  if (!parsed) throw new Error("签名器返回无法解析")
+  if (!parsed) throw new Error(`签名器返回无法解析（${raw.length}B：${JSON.stringify(raw.slice(0, 60))}）`)
   const pagesArr: any[] = Array.isArray(parsed.pages) ? parsed.pages : []
   // 有部分页成功时不能因为后面某一页报错就把已拉到的全丢
   if (parsed?.err && pagesArr.length === 0) throw new Error("签名请求失败：" + String(parsed.err))
@@ -2179,27 +3137,80 @@ async function fetchUserPostsViaSigner(secUid: string, cursor: number = 0, batch
     .filter((v: VideoInfo) => !!v.aweme_id && (!!v.play_url || v.images.length > 0))
   // 顺序以服务端为准（置顶在最前）；只在整页反向时才反转，别再按时间重排
   const ordered = fixOrder(videos)
-  // aweme_count：账号自己主页上「作品 N」的那个 N（含仅自己可见的作品）
-  let totalCount = 0
-  try {
-    const u = (typeof parsed.user === "string" ? safeJSONParse(parsed.user) : parsed.user)?.user
-    totalCount = Number(u?.aweme_count) || 0
-  } catch { totalCount = 0 }
+  // aweme_count：账号主页上「作品 N」的那个 N（含仅自己可见的作品）。
+  // post 接口拿不到它（author 字段没有计数），改由 fetchUserProfile（iesdouyin 免签，~2s）在后台补。
+  const totalCount = 0
   lastListSource = "signer"
   // ok=true 表示「请求本身成功」：即使 aweme_list 为空（已翻到尾部），也不该再回退到分享页
   return { videos: ordered, maxCursor: Number(lastPg?.max_cursor) || 0, hasMore: Number(lastPg?.has_more) === 1, totalCount, ok: true }
 }
 
+
+// ─── 互动：评论（本机 2026-11-15 实测通的免签通道） ───
+/**
+ * 评论列表：`www.iesdouyin.com/web/api/v2/comment/list/` 免签名、免登录直接给 JSON。
+ * 实测：200 / 53KB / 有 cid、text、user.nickname、digg_count、createTime、reply_comment_total、ip_label。
+ *
+ * ⚠️ 顺带记两个**此路不通**的通道（真机实测，别再浪费时间）：
+ *  · App 端 `api5.../aweme/v1/comment/list/` 与 `/aweme/v1/commit/item/digg/`：200 + **0 字节空包**
+ *    （换成 POST / 换 host / 补全参数全一样）。
+ *  · 网页端 `/aweme/v1/web/commit/item/digg/`（带 a_bogus + x-secsdk 签名）：
+ *    `{"status_code":8,"status_msg":"用户未登录"}` —— 存的 Cookie 只有匿名读权限，
+ *    所以**点赞做不了**，播放页的心形按钮改成「本地收藏」，并在注释里写明原因。
+ */
+interface CommentInfo {
+  cid: string
+  text: string
+  nickname: string
+  avatar: string
+  digg_count: number
+  create_time: number
+  reply_count: number
+  ip_label: string
+}
+
+async function fetchComments(awemeId: string, cursor = 0, count = 20): Promise<{
+  comments: CommentInfo[]
+  hasMore: boolean
+  cursor: number
+}> {
+  const url = `https://www.iesdouyin.com/web/api/v2/comment/list/?aweme_id=${encodeURIComponent(awemeId)}&cursor=${cursor}&count=${count}`
+  const res = await timeoutFetch(fetch(url, {
+    headers: { "User-Agent": MOBILE_UA, Referer: "https://www.iesdouyin.com/" },
+  }), 12000)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const j: any = await timeoutFetch(res.json(), 12000)
+  const arr: any[] = Array.isArray(j?.comments) ? j.comments : []
+  const comments: CommentInfo[] = arr.map((c: any) => ({
+    cid: String(c?.cid || ""),
+    text: String(c?.text || ""),
+    nickname: String(c?.user?.nickname || ""),
+    avatar: pickFirstUrl(c?.user?.avatar_thumb?.url_list) || "",
+    digg_count: Number(c?.digg_count) || 0,
+    create_time: Number(c?.createTime ?? c?.create_time) || 0,
+    reply_count: Number(c?.reply_comment_total) || 0,
+    ip_label: String(c?.ip_label || ""),
+  }))
+  return {
+    comments,
+    hasMore: comments.length >= count,
+    cursor: cursor + comments.length,
+  }
+}
+
+
+
+
 /** 最近一次签名通道拿到的「作品总数」（aweme_count，含仅自己可见的作品） */
 let lastAwemeCount = 0
 
 /** 单次取一页（内部用） */
-async function fetchUserPostsOnce(secUid: string, cursor: number = 0, opts: { noCooldown?: boolean; signerOnly?: boolean; batch?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
+async function fetchUserPostsOnce(secUid: string, cursor: number = 0, opts: { noCooldown?: boolean; signerOnly?: boolean; batch?: number; count?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean }> {
   let lastError: unknown = null
   // ① 主通道：登录态 + 你自己的 Python 签名包（完整分页、最快最全）
   if (signerUsable()) {
     try {
-      const parsed = await fetchUserPostsViaSigner(secUid, cursor, opts.batch ?? 1)
+      const parsed = await fetchUserPostsViaSigner(secUid, cursor, opts.batch ?? 1, opts.count ?? POST_PAGE_SIZE)
       if (parsed.totalCount > 0) lastAwemeCount = parsed.totalCount
       if (parsed.videos.length > 0) return parsed
       // 签名请求成功但列表为空 = 已经翻到底（不是通道失败）→ 直接当成功返回，
@@ -2257,7 +3268,7 @@ async function fetchUserPostsOnce(secUid: string, cursor: number = 0, opts: { no
  *   那是 2–3 次 Python 调用 ≈ 3–5s 的白等（用户 2026-11-01 反馈「切用户后第一次加载太久」）。
  *   剩下的页交给 `pullRestInBackground` 在后台增量补，界面先上屏。
  */
-export async function fetchUserPosts(secUid: string, cursor: number = 0, opts: { signerOnly?: boolean; batch?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number }> {
+export async function fetchUserPosts(secUid: string, cursor: number = 0, opts: { signerOnly?: boolean; batch?: number; count?: number } = {}): Promise<{ videos: VideoInfo[]; maxCursor: number; hasMore: boolean; totalCount: number }> {
   // 首屏重置总数：切用户后若新用户的签名通道失败，不能把上一个账号的 aweme_count 当成它的
   if (cursor === 0) lastAwemeCount = 0
   const first = await fetchUserPostsOnce(secUid, cursor, opts)
@@ -2313,6 +3324,8 @@ async function fetchUserProfile(secUid: string): Promise<Partial<SavedUser> | nu
             signature: info.signature || info.desc || "",
             ipLocation: info.ip_location || info.ip_loc || info.region || "",
             gender: info.gender ?? 0,
+            // 作品总数（含仅自己可见的）—— 列表接口给不了，只能从资料接口拿
+            awemeCount: Number(info.aweme_count) || 0,
           }
           break
         }
@@ -2600,15 +3613,33 @@ const GRID_TITLE_HEIGHT = 34                                                    
 const GRID_CARD_HEIGHT = GRID_COVER_HEIGHT + GRID_TITLE_HEIGHT + 5 + 6            // 封面 + 标题 + 间距 + 上下内边距
 const HISTORY_CARD_HEIGHT = GRID_COVER_HEIGHT + GRID_TITLE_HEIGHT + 17 + 10 + 6   // 再多一行日期 + 两个间距
 
+function copyShareUrl(video: VideoInfo) {
+  try {
+    const r: any = Pasteboard.setString(getShareUrl(video))
+    if (r && typeof r.catch === "function") r.catch(() => { })
+  } catch { }
+  try { HapticFeedback.selection() } catch { }
+}
+
 function VideoGridCard({ video, cardWidth, onOpen }: { video: VideoInfo; cardWidth: number; onOpen: () => void }) {
-  const coverWidth = cardWidth - 8
+  const coverWidth = cardWidth
+  const [menuShown, setMenuShown] = useState(false)
   return (
     <VStack
       key={video.aweme_id}
       spacing={5}
-      padding={{ horizontal: 4, vertical: 3 }}
-      frame={{ width: cardWidth, height: GRID_CARD_HEIGHT, alignment: "top" }}
-      background="systemBackground"
+      frame={{ width: cardWidth, alignment: "top" }}
+      confirmationDialog={{
+        title: "作品操作",
+        isPresented: menuShown,
+        onChanged: setMenuShown,
+        message: <Text>{video.desc || "选择要执行的操作"}</Text>,
+        actions: <VStack>
+          <Button title="复制链接" action={() => { copyShareUrl(video); setMenuShown(false) }} />
+          <Button title="打开作品" action={() => { setMenuShown(false); onOpen() }} />
+          <Button title="取消" role="cancel" action={() => setMenuShown(false)} />
+        </VStack>,
+      }}
       overlay={{
         alignment: "topTrailing",
         content: (
@@ -2624,43 +3655,67 @@ function VideoGridCard({ video, cardWidth, onOpen }: { video: VideoInfo; cardWid
       }}
     >
       <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} background="systemGray5" clipShape={{ type: "rect", cornerRadius: 8 }} clipped overlay={{ alignment: "center", content: (
-        <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} background="black" opacity={0.001} onTapGesture={onOpen} />
+        <VStack
+          frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }}
+          background="black"
+          opacity={0.001}
+          contentShape="rect"
+          onTapGesture={onOpen}
+          onLongPressGesture={{ minDuration: 500, perform: () => setMenuShown(true) }}
+        />
       )}}>
         {video.cover ? <Image imageUrl={video.cover} resizable scaleToFill frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} clipped allowsHitTesting={false} overlay={{ alignment: "bottom", content: (
-          <VStack padding={3} spacing={3}>
-            <HStack>
-              {video.duration > 0 ? (
-                <HStack padding={{ horizontal: 6, vertical: 2 }} background="black" opacity={0.6} clipShape={{ type: "rect", cornerRadius: 4 }} spacing={3}>
-                  <Image systemName="play.fill" font="caption2" foregroundStyle="white" />
-                  <Text font="caption2" foregroundStyle="white">{formatDuration(video.duration)}</Text>
-                </HStack>
-              ) : null}
-              {video.images.length > 0 ? (
-                <HStack padding={{ horizontal: 6, vertical: 2 }} background="black" opacity={0.6} clipShape={{ type: "rect", cornerRadius: 4 }} spacing={3}>
-                  <Image systemName="photo.on.rectangle" font="caption2" foregroundStyle="white" />
-                  <Text font="caption2" foregroundStyle="white">{video.images.length}</Text>
-                </HStack>
-              ) : null}
-            </HStack>
-            <HStack>
-              <HStack spacing={2}>
-                <Image systemName="heart.fill" font="caption2" foregroundStyle="systemPink" />
-                <Text font="caption2" foregroundStyle="white">{formatCount(video.digg_count)}</Text>
+          <HStack spacing={4} padding={4} frame={{ maxWidth: "infinity" }}>
+            {video.duration > 0 && video.images.length === 0 ? (
+              <HStack padding={{ horizontal: 4, vertical: 1 }} background="black" opacity={0.55} clipShape={{ type: "rect", cornerRadius: 3 }} spacing={2}>
+                <Image systemName="play.fill" font={8} foregroundStyle="white" />
+                <Text font={10} foregroundStyle="white" lineLimit={1} fixedSize={{ horizontal: true, vertical: false }}>{formatDuration(video.duration)}</Text>
               </HStack>
+            ) : null}
+            {video.images.length > 0 ? (
+              <HStack padding={{ horizontal: 4, vertical: 1 }} background="black" opacity={0.55} clipShape={{ type: "rect", cornerRadius: 3 }} spacing={2}>
+                <Image systemName="photo.on.rectangle" font={8} foregroundStyle="white" />
+                <Text font={10} foregroundStyle="white" lineLimit={1} fixedSize={{ horizontal: true, vertical: false }}>{video.images.length}</Text>
+              </HStack>
+            ) : null}
+            <Spacer />
+            <HStack padding={{ horizontal: 4, vertical: 1 }} background="black" opacity={0.55} clipShape={{ type: "rect", cornerRadius: 3 }} spacing={2}>
+              <Image systemName="heart.fill" font={8} foregroundStyle="white" />
+              <Text font={10} foregroundStyle="white" lineLimit={1} fixedSize={{ horizontal: true, vertical: false }}>{formatCount(video.digg_count)}</Text>
             </HStack>
-          </VStack>
+          </HStack>
         )}} />
         : <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} alignment="center" allowsHitTesting={false}><Image systemName="play.rectangle" font="largeTitle" foregroundStyle="tertiaryLabel" /></VStack>}
       </VStack>
       {/* 标题区固定高度 + 左上对齐：1 行 / 2 行标题都占同一块，卡片高度就一致了 */}
-      <Text
-        font="caption2"
-        lineLimit={2}
-        frame={{ width: coverWidth, height: GRID_TITLE_HEIGHT, alignment: "topLeading" }}
-        padding={{ horizontal: 2 }}
-      >
-        {video.desc}
-      </Text>
+      <HStack spacing={4} frame={{ width: cardWidth }}>
+        <Text
+          font="caption"
+          foregroundStyle="secondaryLabel"
+          lineLimit={1}
+          frame={{ maxWidth: "infinity", alignment: "leading" }}
+        >
+          {video.desc || " "}
+        </Text>
+        <Button action={() => setMenuShown(true)}>
+          <Image
+            systemName="ellipsis"
+            font="caption"
+            foregroundStyle="tertiaryLabel"
+            padding={4}
+            contentShape="rect"
+          />
+        </Button>
+      </HStack>
+    </VStack>
+  )
+}
+
+function GridSkeletonCard({ cardWidth }: { cardWidth: number }) {
+  return (
+    <VStack spacing={5} frame={{ width: cardWidth, alignment: "top" }}>
+      <VStack frame={{ width: cardWidth, height: GRID_COVER_HEIGHT }} background="systemGray5" clipShape={{ type: "rect", cornerRadius: 8 }} />
+      <VStack frame={{ width: Math.round(cardWidth * 0.75), height: 9 }} background="systemGray5" clipShape={{ type: "rect", cornerRadius: 4 }} />
     </VStack>
   )
 }
@@ -2680,12 +3735,14 @@ const worksCache: {
   uid: string
   videos: VideoInfo[]
   cursor: number
+  /** 下一页要用的游标（= 上一页的 max_cursor）；到底后可能越界 */
+  resumeCursor: number
   hasMore: boolean
   totalCount: number
   /** 这份缓存对应的 Cookie 指纹：登录/换号后变了就必须重拉，不能拿旧数据充数 */
   cookieSig: string
   userInfo: { nickname: string; avatar: string }
-} = { uid: "", videos: [], cursor: 0, hasMore: false, totalCount: 0, cookieSig: "", userInfo: { nickname: "", avatar: "" } }
+} = { uid: "", videos: [], cursor: 0, resumeCursor: 0, hasMore: false, totalCount: 0, cookieSig: "", userInfo: { nickname: "", avatar: "" } }
 
 /** Cookie 指纹（长度 + 首尾 8 字符 + sessionid 片段）：只用来判断“登录态变了没”，不落盘完整凭据 */
 function cookieSignature(): string {
@@ -2733,6 +3790,12 @@ interface LastListSnap {
   userInfo: { nickname: string; avatar: string }
 }
 
+/**
+ * 快照里存的游标是「最后成功那一页的请求游标」而不是下一页游标。（2026-11-03）
+ * 为什么：下一页游标到底时会越界（停在服务端收口的末尾）→ 从那里继续只能拿到空页，
+ * 于是“空页→判定到底→又存回 false”变成死循环，这也是“停在 90 条”的真因。
+ * 存在请求游标则最多重拉一页（去重无害），永远能自己自洽。
+ */
 function loadLastList(uid: string): LastListSnap | null {
   if (!uid) return null
   try {
@@ -2742,11 +3805,17 @@ function loadLastList(uid: string): LastListSnap | null {
     if (!o || o.uid !== uid) return null
     if (o.cookieSig && o.cookieSig !== cookieSignature()) return null
     if (!Array.isArray(o.videos) || o.videos.length === 0) return null
+    const vids: VideoInfo[] = o.videos
+    const total = Number(o.totalCount) || 0
+    const resume = Number(o.resumeCursor)
     return {
-      videos: o.videos,
-      cursor: Number(o.cursor) || 0,
-      hasMore: o.hasMore === true,
-      totalCount: Number(o.totalCount) || 0,
+      videos: vids,
+      // 没存过 resumeCursor（旧版快照）→ 只能从头拉
+      cursor: Number.isFinite(resume) && resume > 0 ? resume : 0,
+      // ⚠️ 不信快照里的 hasMore=false：以前被服务端提前收口时存下的 false 会让下次启动
+      // 直接显示“接口没有更多”（2026-11-03 碰到的 90/219）。只要条数少于总数就当还有。
+      hasMore: o.hasMore === true || (total > 0 && vids.length < total),
+      totalCount: total,
       userInfo: o.userInfo && typeof o.userInfo === "object"
         ? { nickname: String(o.userInfo.nickname || ""), avatar: String(o.userInfo.avatar || "") }
         : { nickname: "", avatar: "" },
@@ -2761,8 +3830,11 @@ function saveLastList() {
       uid: worksCache.uid,
       cookieSig: cookieSignature(),
       ts: Date.now(),
-      videos: worksCache.videos.slice(0, 90),
+      // 不截断：截到 90 条会让快照永远“不完整”→ 每次启动都从头拉一遍（慢的根源之一）。
+      // 400 条足够覆盖绝大多数账号；单条 ~1.5KB 时 400 条 ≈ 600KB，Storage 吃得下。
+      videos: worksCache.videos.slice(0, 400),
       cursor: worksCache.cursor,
+      resumeCursor: worksCache.resumeCursor,
       hasMore: worksCache.hasMore,
       totalCount: worksCache.totalCount,
       userInfo: worksCache.userInfo,
@@ -2942,6 +4014,8 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   const [hasMore, setHasMore] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.hasMore : (boot?.hasMore || false)))
   const [totalCount, setTotalCount] = useState(() => (worksCache.uid !== "" && worksCache.uid === loadSecUid() ? worksCache.totalCount : (boot?.totalCount || 0)))
   const [loadingMore, setLoadingMore] = useState(false)
+  // 「加载更多」防连击（state 在同一帧内不可靠）
+  const loadMoreRef = useRef(false)
   const [bgLoading, setBgLoading] = useState(false)
   const [bgLoaded, setBgLoaded] = useState(0)
   const [userInfo, setUserInfo] = useState<{ nickname: string; avatar: string }>(() => {
@@ -2961,6 +4035,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     worksCache.uid = uid
     worksCache.videos = boot.videos
     worksCache.cursor = boot.cursor
+    worksCache.resumeCursor = boot.cursor
     worksCache.hasMore = boot.hasMore
     worksCache.totalCount = boot.totalCount
     if (boot.userInfo.nickname || boot.userInfo.avatar) worksCache.userInfo = boot.userInfo
@@ -2970,6 +4045,12 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   async function doLoadVideos(reset: boolean, uidParam?: string) {
     const targetUid = uidParam || loadSecUid()
     if (!targetUid) { setError("请先设置抖音号"); return }
+    // 加载更多：连续点击只认第一次（state 在同一帧内可能还是旧值，用 ref 最稳）
+    // 放在 uid 校验之后，否则提前 return 会把锁永久留在 true
+    if (!reset) {
+      if (loadMoreRef.current) return
+      loadMoreRef.current = true
+    }
     // 首屏重拉：同号重复请求直接丢弃（避免并发排队）；换了号则作废旧请求
     if (reset) {
       if (resetInFlight) {
@@ -3002,6 +4083,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
         worksCache.uid = targetUid
         worksCache.videos = snap.videos
         worksCache.cursor = snap.cursor
+        worksCache.resumeCursor = snap.cursor
         worksCache.hasMore = snap.hasMore
         worksCache.totalCount = snap.totalCount
         worksCache.userInfo = snapInfo
@@ -3024,6 +4106,12 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
           setLoading(false)
         } else {
           setLoading(true); setVideos([]); setTotalCount(0); worksCache.totalCount = 0
+          // ⚠️ 必须同时清空内存列表：否则后面的 reset 合并（为了不让刷新倒退）
+          // 会把上一个用户的作品一起接进来（2026-11-03 串号 bug）。
+          worksCache.videos = []
+          worksCache.cursor = 0
+          worksCache.resumeCursor = 0
+          worksCache.hasMore = false
           // 切号时先把标题/头像换成目标号的（没有就清空），避免拉取失败时顶部还挂着上一个账号
           const known = loadSavedUsers().find((u) => u.id === targetUid)
           const pre = { nickname: known?.nickname || "", avatar: known?.avatar || "" }
@@ -3039,8 +4127,19 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       if (seq !== loadSeq) return   // 已经有更新的请求了，这次结果作废
       succeeded = true
       if (reset) {
-        setVideos(result.videos)
-        worksCache.videos = result.videos
+        // 只有同一个用户才允许“保留旧列表合并”（防止刷新时从 90 倒退到 30）；
+        // 切号时必须彻底换掉，否则会把上一个人的作品拼进来。
+        const sameUserNow = worksCache.uid === targetUid
+        const prev = sameUserNow ? worksCache.videos : []
+        if (prev.length > result.videos.length) {
+          const ids = new Set(result.videos.map((v) => v.aweme_id))
+          const merged = result.videos.concat(prev.filter((v) => v.aweme_id && !ids.has(v.aweme_id)))
+          worksCache.videos = merged
+          setVideos(merged)
+        } else {
+          setVideos(result.videos)
+          worksCache.videos = result.videos
+        }
       } else {
         const base = worksCache.videos.length > 0 ? worksCache.videos : videos
         const existingIds = new Set(base.map((v) => v.aweme_id))
@@ -3050,6 +4149,8 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       }
       worksCache.uid = targetUid
       worksCache.cursor = result.maxCursor
+      // 这份游标是“能拉到数据的那一页的请求游标”：下次冷启动从这页重拉（去重后无副作用）
+      worksCache.resumeCursor = c
       worksCache.hasMore = result.hasMore
       worksCache.cookieSig = sigAtStart
       if (result.totalCount > 0) worksCache.totalCount = result.totalCount
@@ -3089,9 +4190,10 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
         totalCount: worksCache.totalCount, userInfo: worksCache.userInfo,
         cookieSig: sigAtStart, ts: Date.now(),
       })
-      // 昵称/头像仍然空（典型：走了分享页通道）→ 用免签资料接口补一次，
-      // 别让标题、设置页、切换用户面板里出现「抖音作品 / 未命名」
-      if (!info.nickname && !info.avatar) {
+      // 昵称/头像仍然空（典型：走了分享页通道）或还没拿到作品总数 → 用免签资料接口补一次。
+      // 别让标题、设置页、切换用户面板里出现「抖音作品 / 未命名」；
+      // aweme_count 也只有这里能拿到（列表接口的 author 不带计数）。
+      if (!info.nickname && !info.avatar || worksCache.totalCount <= 0) {
         fetchUserProfile(targetUid).then((p) => {
           if (!p) return
           const cur = loadSavedUsers().find((u) => u.id === targetUid)
@@ -3101,15 +4203,29 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
               ...(p.nickname ? { nickname: p.nickname } : {}),
               ...(p.avatar ? { avatar: p.avatar } : {}),
               ...(p.shortId ? { shortId: p.shortId } : {}),
+              ...(p.awemeCount ? { awemeCount: p.awemeCount } : {}),
             })
           }
-          if (worksCache.uid === targetUid) {
-            const nn = worksCache.userInfo.nickname || p.nickname || ""
-            const av = worksCache.userInfo.avatar || p.avatar || ""
-            if (nn || av) {
-              worksCache.userInfo = { nickname: nn, avatar: av }
-              setUserInfo(worksCache.userInfo)
+          if (worksCache.uid !== targetUid) return
+          const nn = worksCache.userInfo.nickname || p.nickname || ""
+          const av = worksCache.userInfo.avatar || p.avatar || ""
+          if (nn || av) {
+            worksCache.userInfo = { nickname: nn, avatar: av }
+            setUserInfo(worksCache.userInfo)
+          }
+          // 作品总数：拿到后重算底部文案；已经拉全了就把 hasMore 收掉，别让后台继续白跑
+          const total = Number(p.awemeCount) || 0
+          if (total > 0) {
+            lastAwemeCount = total
+            worksCache.totalCount = total
+            setTotalCount(total)
+            if (worksCache.videos.length >= total) {
+              worksCache.hasMore = false
+              setHasMore(false)
+              bgPullToken++
+              setBgLoading(false)
             }
+            saveLastList()
           }
         }).catch(() => { })
       }
@@ -3118,6 +4234,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       // 分页失败是内部状态（后台会自动重试），不要把技术文案弹到顶栏
       if (seq === loadSeq && !err?.silent) setError((e as Error).message)
     } finally {
+      if (!reset) loadMoreRef.current = false
       // 只由「当前这次请求」释放锁，避免被丢弃的旧请求把锁提前清掉
       if (reset && resetInFlight && resetInFlight.seq === seq) resetInFlight = null
       if (seq === loadSeq) {
@@ -3128,7 +4245,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     }
     // 首屏已上屏 / 手动点了一次「加载更多」→ 剩下的页都交给后台一路补齐（不阻塞 UI）
     // 只有本次请求真的成功了才启动后台：失败还拉只会再失败一次
-    if (succeeded && seq === loadSeq && worksCache.hasMore) {
+    if (succeeded && seq === loadSeq && (worksCache.hasMore || worksCache.videos.length < worksCache.totalCount)) {
       saveLastList()
       const token = bgPullToken
       setBgLoaded(worksCache.videos.length)
@@ -3151,7 +4268,15 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
     let cur = startCursor || worksCache.cursor
     let batches = 0
     let failStreak = 0
-    let emptyStreak = 0
+    let endStreak = 0
+    // 后台轨迹写进 Storage（最近 40 行）：出问题能直接看，不用猜
+    const bgLog = (msg: string) => {
+      try {
+        const prev = Storage.get<string>("douyin_bg_log") || ""
+        const lines = (prev ? prev.split("\n") : []).concat([`${new Date().toTimeString().slice(0, 8)} ${msg}`])
+        Storage.set("douyin_bg_log", lines.slice(-40).join("\n"))
+      } catch { }
+    }
     const flushUI = () => {
       setVideos(worksCache.videos)
       setCursor(worksCache.cursor)
@@ -3159,7 +4284,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       setTotalCount(worksCache.totalCount)
     }
     try {
-      while (token === bgPullToken && batches < 20) {
+      while (token === bgPullToken && batches < 40) {
         // 前台正在重拉时让路：Python.run 是串行队列，抢队列会把首屏拖到超时 → 然后降级分享页
         let guard = 0
         while (resetInFlight && guard < 150) {
@@ -3169,54 +4294,81 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
         if (token !== bgPullToken) return
 
         let r: { videos: VideoInfo[]; maxCursor: number; hasMore: boolean } | null = null
+        let failMsg = ""
         try {
-          // 翻页只走签名通道（signerOnly）；签名器内部一次连拉 2 页（batch）
-          // 取 2 不取 3：一次 Python 任务越长，用户点刷新/切号时要排队等它跑完
-          r = await fetchUserPostsOnce(uid, cur, { noCooldown: true, signerOnly: true, batch: 2 })
-        } catch { r = null }
+          // 一次只拉一页（每页 20 条 ≈ 3.6–4.2s）：页面小、不易被吊住，UI 也能及时追加
+          r = await fetchUserPostsOnce(uid, cur, { noCooldown: true, signerOnly: true, batch: 1, count: POST_PAGE_SIZE })
+        } catch (e: any) { r = null; failMsg = String(e?.message || e).slice(0, 60) }
 
         if (!r) {
-          // 瞬时失败（Python 队列/网络）→ 退避重试，不要一次就放弃：
-          // 否则用户看到的就是“永远停在 30 条”
           failStreak++
-          if (failStreak > 3) break
-          await sleep(4000 * failStreak)
+          bgLog(`fail#${failStreak} cur=${cur} ${failMsg}`)
+          if (failStreak >= 6) { bgLog(`give up ×${failStreak}（已 ${worksCache.videos.length} 条）`); break }
+          await sleep(Math.min(1500 * failStreak, 8000))
           if (token !== bgPullToken) return
           continue
         }
+        // ⚠️ 拿到数据后必须再确认一次：切号发生在 await 期间时，
+        // token 已经变了，这里还把旧用户的页 merge 进来就是串号。
+        if (token !== bgPullToken) return
         failStreak = 0
-        batches++
-
         const base = worksCache.videos
         const seen = new Set(base.map((v) => v.aweme_id))
         const add = r.videos.filter((v) => v.aweme_id && !seen.has(v.aweme_id))
-        if (add.length > 0) worksCache.videos = base.concat(add)
         const prevCursor = cur
-        worksCache.cursor = r.maxCursor
-        worksCache.hasMore = r.hasMore === true
+        if (add.length > 0) worksCache.videos = base.concat(add)
+        if (r.videos.length > 0) {
+          batches++
+          // 能拉到数据的这一页的请求游标：冷启动续拉时从这里重拉（去重后无副作用，永远自洽）
+          worksCache.resumeCursor = prevCursor
+        }
+        worksCache.cursor = r.maxCursor || prevCursor
         if (lastAwemeCount > 0) worksCache.totalCount = lastAwemeCount
+        bgLog(`ok cur=${prevCursor} 返回${r.videos.length} 新增${add.length} 合计${worksCache.videos.length}/${worksCache.totalCount} more=${r.hasMore ? 1 : 0} next=${r.maxCursor}`)
+
+        // 服务端说“没有更多”时按差额判断可信度：
+        //   差额很小（≤ max(5, 15%)）→ 就是正常尾页，立即收工（以前一律三次确认，白等 27s）。
+        //   差额很大 → 大概率提前收口，同游标再试一次才认。
+        const gap = worksCache.totalCount > 0 ? worksCache.totalCount - worksCache.videos.length : 0
+        const suspicious = gap > Math.max(5, Math.floor(worksCache.totalCount * 0.15))
+        if (r.videos.length === 0 || r.hasMore !== true) {
+          endStreak++
+          setBgLoaded(worksCache.videos.length)
+          flushUI()
+          const needMore = r.videos.length === 0 || suspicious
+          if (!needMore || endStreak >= 2) {
+            worksCache.hasMore = false
+            bgLog(`end cur=${prevCursor} 共 ${worksCache.videos.length}/${worksCache.totalCount}（确认×${endStreak} gap=${gap}）`)
+            flushUI()
+            saveLastList()
+            break
+          }
+          cur = prevCursor
+          await sleep(2500)
+          if (token !== bgPullToken) return
+          continue
+        }
+        endStreak = 0
+        worksCache.hasMore = true
         setBgLoaded(worksCache.videos.length)
         flushUI()
         saveLastList()
-
-        if (r.videos.length === 0) {
-          // 空页不一定是“到底”（可能是瞬时限流）：连续两次空页、或游标没前进才停
-          emptyStreak++
-          if (emptyStreak >= 2 || r.maxCursor === prevCursor) {
+        cur = r.maxCursor || prevCursor
+        if (cur === prevCursor) {
+          // 游标没前进：服务端在原地打转
+          endStreak++
+          if (endStreak >= 2) {
             worksCache.hasMore = false
-            setHasMore(false)
+            bgLog(`cursor stuck ×${endStreak} → 判定到底，共 ${worksCache.videos.length} 条`)
+            flushUI()
+            saveLastList()
             break
           }
-          cur = r.maxCursor || prevCursor
-          await sleep(4000)
+          await sleep(2500)
           continue
         }
-        emptyStreak = 0
-        if (r.hasMore !== true) break
-        cur = r.maxCursor
-        if (cur === prevCursor) break   // 游标没前进 = 服务端在原地打转，别死循环
-        // 降频：Python.run 是串行队列，拉得太密会把前台请求（首屏/刷新）挤到超时
-        await sleep(800)
+        // 降频：留一点间隔（实测连续 3 页无间隔也能全过，不用 3.5s 那么保守）
+        await sleep(900)
       }
     } finally {
       // 只有“自己还是当前后台”才推 UI，否则切号后会把旧状态盖到新列表上
@@ -3321,7 +4473,7 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
       { size: gridCardWidth, spacing: 14 },
     ]} spacing={16}>
       {videos.map((v, i) => (
-        <VideoGridCard key={v.aweme_id} video={v} cardWidth={gridCardWidth} onOpen={() => openVideo(v, i)} />
+        <VideoGridCard key={v.aweme_id} video={v} cardWidth={gridCardWidth} onOpen={() => openVideo(v, i, videos)} />
       ))}
     </LazyVGrid>
   ), [videos, gridCardWidth])
@@ -3331,31 +4483,34 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
   // 所以「已加载全部作品」不能硬编码，必须拿总数对比。
   // ⚠️ 底部提示只在「确实没拿全」时出现（用户 2026-11-01 反馈：8 条全出来了还在提示「仅显示最近 8 条」）
   // 总数未知（totalCount=0，比如只走了分享页）且 hasMore=false → 完全没有“缺”的证据，宁可不说话
-  const listComplete = totalCount > 0 && videos.length >= totalCount
-  const listShort = totalCount > 0 && videos.length < totalCount
+  // 差额很小时（≤3 条或 ≤3%）当它已经全了：实测 214/219 这种差 5 条的情况，
+  // 接口确实不再返回，为几条去提示用户只会让人以为又少拉了。
+  const listGap = totalCount > 0 ? totalCount - videos.length : 0
+  // 总数未知（资料接口还没回来）时，只要接口说没更多就直接算“加载完毕”
+  const listComplete = totalCount > 0
+    ? listGap <= Math.max(3, Math.floor(totalCount * 0.03))
+    : (!hasMore && videos.length > 0)
+  const listShort = totalCount > 0 && !listComplete
 
   return (
     <NavigationStack>
       <List
         navigationTitle={userInfo.nickname || "抖音作品"}
+        refreshable={async () => { await doLoadVideos(true) }}
         toolbar={{
           topBarLeading: dismissApp ? <Button title="关闭" action={() => dismissApp?.()} /> : undefined,
           topBarTrailing: (
             <HStack spacing={10}>
               {inHomeTab ? (
-                <Button action={() => { Navigation.present(<HistoryView isActive={true} />) }}>
-                  <Image systemName="clock" font="title3" />
-                </Button>
+                <Menu label={<Image systemName="ellipsis.circle" font="title3" />}>
+                  <Button title="历史记录" systemImage="clock" action={() => { Navigation.present(<HistoryView isActive={true} />) }} />
+                  <Button title="设置" systemImage="gear" action={() => { Navigation.present(<SettingsView isActive={true} onCookieChanged={() => { doLoadVideos(true) }} />) }} />
+                </Menu>
               ) : null}
-              {/* 刷新：图标按钮（与左右两个入口同款） */}
+              {/* 刷新：图标按钮 */}
               <Button action={() => doLoadVideos(true)} disabled={loading}>
                 <Image systemName="arrow.clockwise" font="title3" />
               </Button>
-              {inHomeTab ? (
-                <Button action={() => { Navigation.present(<SettingsView isActive={true} onCookieChanged={() => { doLoadVideos(true) }} />) }}>
-                  <Image systemName="gear" font="title3" />
-                </Button>
-              ) : null}
               {userInfo.avatar ? (
                 <Image
                   imageUrl={userInfo.avatar}
@@ -3407,9 +4562,16 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
 
         {loading ? (
           <Section>
-            <VStack frame={{ maxWidth: "infinity", height: 300 }} alignment="center" spacing={12}>
-              <ProgressView />
-              <Text font="callout" foregroundStyle="secondaryLabel">加载中...</Text>
+            <VStack padding={{ horizontal: 12 }}>
+              <LazyVGrid columns={[
+                { size: gridCardWidth, spacing: 14 },
+                { size: gridCardWidth, spacing: 14 },
+                { size: gridCardWidth, spacing: 14 },
+              ]} spacing={16}>
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                  <GridSkeletonCard key={i} cardWidth={gridCardWidth} />
+                ))}
+              </LazyVGrid>
             </VStack>
           </Section>
         ) : videos.length === 0 ? (
@@ -3453,11 +4615,11 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
                     <HStack spacing={6} frame={{ maxWidth: "infinity" }}>
                       <Image systemName="info.circle" font="caption" foregroundStyle="tertiaryLabel" />
                       <Text font="subheadline" frame={{ maxWidth: "infinity", alignment: "leading" }}>
-                        已显示 {videos.length} / 共 {totalCount} 条
+                        已加载 {videos.length} 条 · 接口没有更多
                       </Text>
                     </HStack>
                     <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={5} frame={{ maxWidth: "infinity", alignment: "leading" }}>
-                      差的 {totalCount - videos.length} 条不会出现在列表里：可能是作者设为「仅自己可见 / 朋友可见」的作品（只有作者本人能看到），也可能是图文笔记（移动端列表接口不返回）。
+                      账号显示 {totalCount} 条，接口只返回到这里
                     </Text>
                   </VStack>
                 ) : listComplete ? (
@@ -3475,14 +4637,14 @@ export function HomeView({ dismissApp, isActive, homeTab }: { dismissApp?: () =>
 }
 
 function HistoryItemCard({ item, idx, history, setHistory, cardWidth }: { item: HistoryItem; idx: number; history: HistoryItem[]; setHistory: (h: HistoryItem[]) => void; cardWidth: number }) {
-  const coverWidth = cardWidth - 8
+  const coverWidth = cardWidth
   const [confirmDelete, setConfirmDelete] = useState(false)
   // 日期格式化只算一次（原先每次重渲染都 new Date + 国际化格式化）
   const viewedDate = useMemo(() => new Date(item.viewed_at).toLocaleDateString("zh-CN"), [item.viewed_at])
-  const onPlay = () => openVideo(item, idx)
+  const onPlay = () => openVideo(item, idx, history)
   const onDelete = () => { const u = history.filter((h) => h.aweme_id !== item.aweme_id); saveHistory(u); setHistory(u); setConfirmDelete(false) }
   return (
-    <VStack spacing={5} padding={{ horizontal: 4, vertical: 3 }} frame={{ width: cardWidth, height: HISTORY_CARD_HEIGHT, alignment: "top" }} background="systemBackground" onLongPressGesture={{ minDuration: 600, perform: () => setConfirmDelete(true) }} confirmationDialog={{
+    <VStack spacing={5} frame={{ width: cardWidth, alignment: "top" }} confirmationDialog={{
       title: "删除这条历史？",
       isPresented: confirmDelete,
       onChanged: setConfirmDelete,
@@ -3504,8 +4666,14 @@ function HistoryItemCard({ item, idx, history, setHistory, cardWidth }: { item: 
           <VStack frame={{ width: coverWidth, height: GRID_COVER_HEIGHT }} alignment="center" allowsHitTesting={false}><Image systemName="play.rectangle" font="largeTitle" foregroundStyle="tertiaryLabel" /></VStack>
         )}
       </VStack>
-      <Text font="caption2" lineLimit={2} frame={{ width: coverWidth, height: GRID_TITLE_HEIGHT, alignment: "topLeading" }} padding={{ horizontal: 2 }}>{item.desc}</Text>
-      <Text font="caption2" foregroundStyle="tertiaryLabel" padding={{ horizontal: 2 }}>{viewedDate}</Text>
+      <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1} frame={{ width: coverWidth, alignment: "leading" }}>{item.desc || " "}</Text>
+      <HStack spacing={4} frame={{ width: coverWidth }}>
+        <Text font="caption2" foregroundStyle="tertiaryLabel">{viewedDate}</Text>
+        <Spacer />
+        <Button action={() => setConfirmDelete(true)}>
+          <Image systemName="ellipsis" font="caption" foregroundStyle="tertiaryLabel" padding={4} contentShape="rect" />
+        </Button>
+      </HStack>
     </VStack>
   )
 }
@@ -3521,17 +4689,66 @@ export function HistoryView({ dismissApp, isActive }: { dismissApp?: () => void;
   }, [isActive])
 
   // 网格内容 memo：避免无关状态变化重建整页卡片
-  const gridContent = useMemo(() => (
-    <LazyVGrid columns={[
+  const [kindFilter, setKindFilter] = useState<"all" | "video" | "image">("all")
+
+  const gridContent = useMemo(() => {
+    const dayLabel = (t: number) => {
+      const d = new Date(t)
+      const now = new Date()
+      const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+      const diff = Math.round((startOf(now) - startOf(d)) / 86400000)
+      if (diff <= 0) return "今天"
+      if (diff === 1) return "昨天"
+      if (diff < 7) return `${diff} 天前`
+      return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+    }
+    const shown = history.filter((h) =>
+      kindFilter === "all" ? true : kindFilter === "image" ? h.images.length > 0 : h.images.length === 0
+    )
+    const groups: { label: string; entries: { item: HistoryItem; idx: number }[] }[] = []
+    shown.forEach((item) => {
+      const idx = history.indexOf(item)
+      const label = dayLabel(item.viewed_at)
+      const last = groups[groups.length - 1]
+      if (last && last.label === label) last.entries.push({ item, idx })
+      else groups.push({ label, entries: [{ item, idx }] })
+    })
+    const columns = [
       { size: gridCardWidth, spacing: 14 },
       { size: gridCardWidth, spacing: 14 },
       { size: gridCardWidth, spacing: 14 },
-    ]} spacing={16}>
-      {history.map((item, idx) => (
-        <HistoryItemCard key={item.aweme_id} item={item} idx={idx} history={history} setHistory={setHistory} cardWidth={gridCardWidth} />
-      ))}
-    </LazyVGrid>
-  ), [history, gridCardWidth])
+    ]
+    return (
+      <VStack spacing={16} frame={{ maxWidth: "infinity" }}>
+        <HStack spacing={8} frame={{ maxWidth: "infinity" }}>
+          {([["all", "全部"], ["video", "视频"], ["image", "图文"]] as const).map(([key, label]) => (
+            <Button key={key} action={() => setKindFilter(key)}>
+              <Text
+                font="footnote"
+                foregroundStyle={kindFilter === key ? "white" : "secondaryLabel"}
+                padding={{ horizontal: 12, vertical: 5 }}
+                background={kindFilter === key ? "systemBlue" : "secondarySystemBackground"}
+                clipShape={{ type: "capsule", style: "continuous" }}
+                contentShape="rect"
+              >{label}</Text>
+            </Button>
+          ))}
+          <Spacer />
+          <Text font="caption2" foregroundStyle="tertiaryLabel">{shown.length} 条</Text>
+        </HStack>
+        {groups.map((g) => (
+          <VStack key={g.label} spacing={10} frame={{ maxWidth: "infinity" }}>
+            <Text font="footnote" bold foregroundStyle="secondaryLabel" frame={{ maxWidth: "infinity", alignment: "leading" }}>{g.label}</Text>
+            <LazyVGrid columns={columns} spacing={16}>
+              {g.entries.map(({ item, idx }) => (
+                <HistoryItemCard key={item.aweme_id} item={item} idx={idx} history={history} setHistory={setHistory} cardWidth={gridCardWidth} />
+              ))}
+            </LazyVGrid>
+          </VStack>
+        ))}
+      </VStack>
+    )
+  }, [history, gridCardWidth, kindFilter])
 
   return (
     <NavigationStack>
@@ -3565,8 +4782,36 @@ export function HistoryView({ dismissApp, isActive }: { dismissApp?: () => void;
 }
 
 // ─── 设置 ───
-export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean; onCookieChanged?: () => void }) {
-  const [inputValue, setInputValue] = useState("")
+function CacheClearRow({ stat, message, clearing, onClear }: {
+  stat: { files: number; bytes: number } | null
+  message: string
+  clearing: boolean
+  onClear: () => void
+}) {
+  const detail = !stat
+    ? "统计中…"
+    : stat.files === 0
+      ? "暂无缓存"
+      : `${stat.files} 个视频 · ${formatBytes(stat.bytes)}`
+  return (
+    <HStack spacing={10} frame={{ maxWidth: "infinity" }} alignment="center" padding={{ vertical: 6 }}>
+      <Image systemName="internaldrive" font="subheadline" foregroundStyle="secondaryLabel" />
+      <VStack spacing={2} alignment="leading">
+        <Text font="subheadline">视频缓存</Text>
+        <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={2}>{message || detail}</Text>
+      </VStack>
+      <Spacer />
+      <Button
+        title={clearing ? "清理中…" : "一键清理"}
+        buttonStyle="borderless"
+        disabled={clearing || (stat?.files ?? 0) === 0}
+        action={onClear}
+      />
+    </HStack>
+  )
+}
+
+export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean; onCookieChanged?: () => void }) {  const [inputValue, setInputValue] = useState("")
   const [cookieValue, setCookieValue] = useState("")
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState<{ type: string; text: string }>({ type: "", text: "" })
@@ -3583,6 +4828,10 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
   const [syncBusy, setSyncBusy] = useState(false)
   const [syncStat, setSyncStat] = useState<SyncStatus | null>(() => loadSyncStatus())
   const [cloudReady] = useState(() => icloudReady())
+  // 视频缓存（设置页“增强”分区）
+  const [cacheStat, setCacheStat] = useState<{ files: number; bytes: number } | null>(null)
+  const [cacheClearing, setCacheClearing] = useState(false)
+  const [cacheMsg, setCacheMsg] = useState("")
   const syncTitle = !cloudReady
     ? "iCloud 不可用"
     : !syncOn
@@ -3695,6 +4944,8 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
       try { setSyncStat(syncWithCloud()) } catch { }
     }
     refreshSavedUsers()
+    // 顺带刷新缓存占用（扫盘放在 effect 里，不在 render 里做）
+    setCacheStat(videoCacheStats())
   }, [isActive])
 
   // 检查 Cookie 状态
@@ -3939,7 +5190,7 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
           </VStack>
         </Section>
 
-        <Section title="iCloud 同步">
+        <Section title="增强">
           {!cloudReady ? (
             <VStack spacing={4} alignment="leading" padding={{ vertical: 4 }} frame={{ maxWidth: "infinity" }}>
               <Text font="body">iCloud 不可用</Text>
@@ -3960,20 +5211,20 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
                   }
                 }}
               />
-              <HStack spacing={10} frame={{ maxWidth: "infinity" }} alignment="center">
+              <HStack spacing={10} frame={{ maxWidth: "infinity" }} alignment="center" padding={{ vertical: 6 }}>
                 <Image
                   systemName={syncStat?.result === "ok" ? "checkmark.icloud" : "icloud.slash"}
                   font="subheadline"
                   foregroundStyle={syncStat?.result === "ok" ? "systemGreen" : "secondaryLabel"}
                 />
-                <VStack spacing={2} alignment="leading" frame={{ maxWidth: "infinity" }}>
+                <VStack spacing={2} alignment="leading">
                   <Text font="subheadline">{syncTitle}</Text>
-                  <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={3}>{syncDetail}</Text>
+                  <Text font="caption2" foregroundStyle="tertiaryLabel" lineLimit={2}>{syncDetail}</Text>
                 </VStack>
                 <Spacer />
                 <Button
                   title={syncBusy ? "同步中…" : "立即同步"}
-                  buttonStyle="bordered"
+                  buttonStyle="borderless"
                   disabled={syncBusy || !syncOn}
                   action={() => {
                     setSyncBusy(true)
@@ -3987,6 +5238,23 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
               </HStack>
             </VStack>
           )}
+
+          {/* 一键清理视频缓存 */}
+          <CacheClearRow
+            stat={cacheStat}
+            message={cacheMsg}
+            clearing={cacheClearing}
+            onClear={() => {
+              setCacheClearing(true)
+              setTimeout(() => {
+                const removed = clearVideoCache()
+                setCacheStat(videoCacheStats())
+                setCacheMsg(removed > 0 ? `已清理 ${removed} 个视频` : "没有可清理的缓存")
+                setCacheClearing(false)
+                setTimeout(() => setCacheMsg(""), 2500)
+              }, 30)
+            }}
+          />
         </Section>
 
         <Section title={`已保存用户（${savedUsers.length}）`}>
@@ -4039,8 +5307,277 @@ export function SettingsView({ isActive, onCookieChanged }: { isActive: boolean;
 }
 
 // ─── 主入口 ───
+
 // ─── 版本更新说明（新版本首次打开时以底部 Sheet 展示） ───
 const UPDATE_NOTES: { version: string; date: string; items: string[] }[] = [
+  {
+    version: "3.9",
+    date: "2026-11-15",
+    items: [
+      "修复：图文作品卡片底部不再显示时长标签（之前时长/图片数/点赞三个标签挤在一起显示不全）",
+    ],
+  },
+  {
+    version: "3.8",
+    date: "2026-11-15",
+    items: [
+      "优化：下载改为按钮内圆形百分比进度，完成后提示下载完成（不再跳转日志界面）",
+    ],
+  },
+  {
+    version: "3.7",
+    date: "2026-11-15",
+    items: [
+      "优化：图文作品播放页按钮与视频一致，右侧操作栏直接保存当前页",
+      "优化：移除播放页截帧按钮",
+    ],
+  },
+  {
+    version: "3.6.3",
+    date: "2026-11-15",
+    items: [
+      "修复：截帧改用独立解码的 extractFrame，不再依赖当前显示帧，真机验证能存出画面",
+    ],
+  },
+  {
+    version: "3.6.2",
+    date: "2026-11-15",
+    items: [
+      "修复：截帧报「Timer requires its active script」错误，改掉截图超时写法并先暂停再取帧",
+    ],
+  },
+  {
+    version: "3.6.1",
+    date: "2026-11-15",
+    items: [
+      "修复：播放中途网络中断（Input/output error）自动暂停，现自动重连并续播",
+    ],
+  },
+  {
+    version: "3.6",
+    date: "2026-11-15",
+    items: [
+      "新增：播放页支持上下滑切换作品，滑到底自动加载下一页",
+      "新增：评论面板，可直接看作品评论并分页加载",
+      "新增：心形按钮收藏作品到本地（抖音点赞需要登录态，当前 Cookie 没有）",
+      "修复：截帧存相册（先取原生帧，拿不到再解码一帧兑底）",
+      "优化：播放页改为全屏呈现，下拉不再误关，右上角 ✕ 关闭",
+      "优化：图文作品的页码与导出按钮不再被底部文案遮住",
+    ],
+  },
+  {
+    version: "3.5",
+    date: "2026-11-15",
+    items: [
+      "新增：播放页右侧操作栏（点赞 / 评论 / 链接 / 保存 / 缓存 / 截帧）",
+      "新增：播放页支持画中画，可边看边刷列表",
+      "新增：播放页可一键截取当前画面存相册",
+      "新增：单击暂停 / 长按 2 倍速 / 点进度线跳转",
+      "优化：播放内核换成新播放器，直链过期自动换地址重试",
+    ],
+  },
+  {
+    version: "3.4",
+    date: "2026-11-15",
+    items: [
+      "新增：历史页可按「全部 / 视频 / 图文」筛选",
+      "优化：设置页去掉顶部应用信息卡",
+    ],
+  },
+  {
+    version: "3.3",
+    date: "2026-11-14",
+    items: [
+      "优化：作品卡片时长与点赞改为一行小字，不再被挤成省略号",
+    ],
+  },
+  {
+    version: "3.2",
+    date: "2026-11-14",
+    items: [
+      "新增：历史页按「今天 / 昨天 / N 天前 / 具体日期」分组",
+    ],
+  },
+  {
+    version: "3.1",
+    date: "2026-11-14",
+    items: [
+      "新增：播放页左上角显示作者头像、昵称与作品标题",
+    ],
+  },
+  {
+    version: "3.0",
+    date: "2026-11-14",
+    items: [
+      "优化：历史页改用「…」按钮删除，与作品页交互一致",
+      "优化：设置页顶部新增应用信息卡",
+    ],
+  },
+  {
+    version: "2.9",
+    date: "2026-11-14",
+    items: [
+      "新增：每张作品标题右侧的「…」按钮，点它直接弹操作菜单",
+    ],
+  },
+  {
+    version: "2.8",
+    date: "2026-11-14",
+    items: [
+      "新增：长按作品弹出操作菜单（复制链接 / 打开）",
+      "新增：设置页顶部显示应用信息卡",
+    ],
+  },
+  {
+    version: "2.7",
+    date: "2026-11-14",
+    items: [
+      "优化：历史页卡片与作品页统一，去掉白底、标题改为一行",
+    ],
+  },
+  {
+    version: "2.6",
+    date: "2026-11-14",
+    items: [
+      "修复：长按依旧会作用于整页，现改为只作用于单张封面",
+      "优化：长按封面直接复制作品链接，并在页内提示",
+    ],
+  },
+  {
+    version: "2.5",
+    date: "2026-11-14",
+    items: [
+      "修复：长按作品会弹出整页菜单，现在只作用于单张封面",
+    ],
+  },
+  {
+    version: "2.4",
+    date: "2026-11-14",
+    items: [
+      "新增：作品卡片长按可复制链接，或直接打开",
+      "优化：作品页去掉顶部资料卡，回到纯列表",
+    ],
+  },
+  {
+    version: "2.3",
+    date: "2026-11-14",
+    items: [
+      "新增：作品页顶部头像与「作品 / 粉丝 / 获赞」资料卡",
+      "优化：切换抖音号后资料数字同步更新",
+    ],
+  },
+  {
+    version: "2.2",
+    date: "2026-11-14",
+    items: [
+      "新增：作品页支持下拉刷新",
+      "新增：加载时显示骨架占位，不再空等转圈",
+      "优化：作品卡片去掉白底，封面圆角通栏，时长与点赞叠在封面上，标题改一行",
+      "优化：历史记录与设置收进右上角菜单，工具栏更干净",
+    ],
+  },
+  {
+    version: "2.1",
+    date: "2026-11-05",
+    items: [
+      "修复：「立即同步」「一键清理」改为纯文字按钮，与「已同步」「视频缓存」两行对齐",
+      "修复：作品页「加载更多」连续点击会重复请求",
+      "优化：点开作品加防重复触发，连点只打开一次",
+    ],
+  },
+  {
+    version: "2.0",
+    date: "2026-11-05",
+    items: [
+      "新增：视频可以缓存到本机，下次打开直接播本地，断网也能看",
+      "新增：设置里「增强」分区，iCloud 同步与缓存管理放到一起，可一键清理缓存",
+      "修复：播放页不能下拉关闭",
+      "优化：播放页恢复系统控件，界面更干净",
+    ],
+  },
+  {
+    version: "1.0.60",
+    date: "2026-11-05",
+    items: [
+      "新增：设置里「增强」分区，iCloud 同步与缓存管理放在一起",
+      "新增：一键清理视频缓存，显示缓存个数与占用大小",
+      "优化：清理后立即刷新占用，没缓存时按钮自动置灰",
+    ],
+  },
+  {
+    version: "1.0.59",
+    date: "2026-11-05",
+    items: [
+      "修复：播放页不能下拉关闭",
+      "优化：播放页恢复原来的样子（系统播放控件、界面干净）",
+      "优化：缓存改成存本地文件，下次点开直接播本地，不联网",
+    ],
+  },
+  {
+    version: "1.0.58",
+    date: "2026-11-05",
+    items: [
+      "新增：播放控件（拖进度、前后 10 秒、播/停，设置里有倍速与音轨）",
+      "新增：视频可缓存到本机，下次打开直接播本地文件，断网也能看",
+      "优化：缓存/下载/画中画收到控件栏上方一行，画面不再被角标遮住",
+    ],
+  },
+  {
+    version: "1.0.57",
+    date: "2026-11-05",
+    items: [
+      "新增：视频页换成系统新一代播放器，画面自带手势",
+      "新增：双击左右半屏前后 10 秒，横滑拖进度，右侧竖滑音量、左侧竖滑亮度，长按 2 倍速",
+      "新增：视频页支持画中画",
+      "优化：播放页不再有系统控件条挡画面，打开准备时间约 0.9 秒",
+    ],
+  },
+  {
+    version: "1.0.56",
+    date: "2026-11-03",
+    items: [
+      "修复：打开后要等很久才出作品（Python 首次调用会丢输出，白跑一次 4–8 秒）",
+      "修复：作品只加载到几十条就不再增加（每页 30 条时接口会卡住不回，超时后放弃）",
+      "优化：每页改成 20 条并加上硬超时，翻页耗时降到 3–4 秒一页",
+      "优化：作品总数改用免签资料接口（约 2 秒），不再拖慢首屏",
+      "优化：首屏快照不再只存 90 条，换回自己的账号能直接看到全部",
+    ],
+  },
+  {
+    version: "1.0.55",
+    date: "2026-11-03",
+    items: [
+      "修复：切换用户后，上一个用户的作品会混进新用户的列表",
+      "修复：切换瞬间旧后台请求返回时可能把旧数据写进新列表",
+    ],
+  },
+  {
+    version: "1.0.54",
+    date: "2026-11-03",
+    items: [
+      "修复：作品只加载到几十条就显示「接口没有更多」（旧缓存里的「已到底」标记被当真了）",
+      "修复：后台翻页改成一页一次、间隔 2.5 秒，服务端提前收口时会重试三次才判定结束",
+      "优化：数据明显不全时，下次打开会从头重新补齐，不再拿旧游标续拉",
+    ],
+  },
+  {
+    version: "1.0.53",
+    date: "2026-11-03",
+    items: [
+      "修复：底部「差的 N 条可能是私密 / 图文」的推测文案（实测拉到底证明差的就是接口不给）",
+      "优化：差额在 3 条以内（或 3% 以下）直接算已加载全部，不再为几条打扰",
+    ],
+  },
+  {
+    version: "1.0.52",
+    date: "2026-11-03",
+    items: [
+      "新增：锁屏与控制中心会显示正在看的作品和作者，可以直接暂停/继续",
+      "新增：短视频自动循环播放，与抖音 App 一致",
+      "新增：缓冲时显示「缓冲中」，不再停在那一帧让人以为卡死",
+      "优化：来电或闹钟打断结束后自动接着播",
+    ],
+  },
   {
     version: "1.0.51",
     date: "2026-11-02",
@@ -4313,7 +5850,7 @@ const UPDATE_NOTES: { version: string; date: string; items: string[] }[] = [
       "更新弹窗重新设计（参考你自己的 115获取Cookie / FileStore）",
       "改为固定高度的底部小卡片（不再撑满整屏）+ 拖拽指示条",
       "标题/正文用原生字号与行距，按钮改成系统的 emphasized 样式",
-      "首次使用与版本更新文案分开：「首次使用 · 开始使用」/「本次更新 · 知道了」",
+      "首次使用与版本更新文案分开：「首次使用」多一段用途说明、首次使用才给「开始使用」；版本更新弹窗无按钮，下滑关闭",
     ],
   },
   {
@@ -4498,7 +6035,7 @@ function UpdateNotesView({ notes, isFirstRun, onClose }: {
       alignment="leading"
       spacing={16}
       padding={22}
-      presentationDetents={[380]}
+      presentationDetents={[isFirstRun ? 380 : 300]}
       presentationDragIndicator="visible"
     >
       <VStack alignment="leading" spacing={4}>
@@ -4517,12 +6054,15 @@ function UpdateNotesView({ notes, isFirstRun, onClose }: {
           <Text key={i} font={14} lineSpacing={4}>{"• " + t}</Text>
         ))}
       </VStack>
-      <Button
-        title={isFirstRun ? "开始使用" : "知道了"}
-        systemImage="arrow.right.circle.fill"
-        buttonStyle="borderedProminent"
-        action={onClose}
-      />
+      {/* 版本更新弹窗一律不放按钮（用户 2026-10-30 定稿，所有脚本适用），下滑关闭；只有首次使用才给「开始使用」 */}
+      {isFirstRun ? (
+        <Button
+          title="开始使用"
+          systemImage="arrow.right.circle.fill"
+          buttonStyle="borderedProminent"
+          action={onClose}
+        />
+      ) : null}
     </VStack>
   )
 }

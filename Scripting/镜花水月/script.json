@@ -1,45 +1,50 @@
 {
-  "color" : "rgba(28, 140, 255,1)",
-  "runInApp" : false,
-  "entry" : "index.tsx",
-  "description" : "镜花水月",
-  "remoteResource" : null,
-  "author" : {
-    "homepage" : "https:\/\/github.com\/7452323",
-    "name" : "7452323",
-    "email" : "7452323@gmail.com"
+  "localizedNames" : {
+    "ru" : "",
+    "en" : "",
+    "it" : "",
+    "de" : "",
+    "fr" : "",
+    "ja" : "",
+    "pt" : "",
+    "es" : "",
+    "zh" : ""
   },
-  "version" : "1.0.51",
-  "icon" : "livephoto",
+  "runInApp" : false,
+  "version" : "3.9",
+  "localizedDescriptions" : {
+    "ja" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "",
+    "de" : "",
+    "it" : "",
+    "es" : "",
+    "en" : "",
+    "fr" : ""
+  },
   "name" : "镜花水月",
   "intentInputTypes" : [
 
   ],
-  "permissions" : null,
+  "description" : "镜花水月",
   "iconImage" : "",
+  "permissions" : null,
+  "remoteDefinitionId" : null,
+  "author" : {
+    "name" : "7452323",
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323"
+  },
+  "remoteResource" : {
+    "url" : "https:\/\/github.com\/7452323\/Scripting\/tree\/main\/Scripting\/%E9%95%9C%E8%8A%B1%E6%B0%B4%E6%9C%88",
+    "hash" : "19aff0cb46078dbcbb9937f0971572eb",
+    "autoUpdateInterval" : null
+  },
+  "icon" : "livephoto",
+  "entry" : "index.tsx",
+  "color" : "rgba(28, 140, 255,1)",
   "contributors" : [
 
-  ],
-  "localizedNames" : {
-    "ja" : "",
-    "de" : "",
-    "ru" : "",
-    "es" : "",
-    "zh" : "",
-    "it" : "",
-    "en" : "",
-    "fr" : "",
-    "pt" : ""
-  },
-  "localizedDescriptions" : {
-    "it" : "",
-    "ja" : "",
-    "zh" : "",
-    "pt" : "",
-    "ru" : "",
-    "de" : "",
-    "en" : "",
-    "es" : "",
-    "fr" : ""
-  }
+  ]
 }

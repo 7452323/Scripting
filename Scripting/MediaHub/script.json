@@ -26,7 +26,7 @@
   "name" : "MediaHub",
   "localizedDescriptions" : {
     "de" : "",
-    "en" : "Universal media player foundation with native playback and library management. Designed for future Emby, Plex, 115 and script sources.",
+    "en" : "Universal media player foundation with native playback and library management.",
     "fr" : "",
     "it" : "",
     "ja" : "",
@@ -40,6 +40,6 @@
   "intentInputTypes" : [
 
   ],
-  "version" : "0.1.1",
+  "version" : "0.1.2",
   "iconImage" : null
 }

@@ -4,6 +4,7 @@ import {
   DocumentPicker,
   HStack,
   List,
+  NavigationStack,
   Section,
   Text,
   TextField,
@@ -18,26 +19,25 @@ import {
   toggleFavorite,
 } from "../storage"
 import { presentPlayer } from "../player"
+import { pageToolbarProps } from "./toolbar"
 
 export function LibraryPage() {
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
   const [urlInput, setUrlInput] = useState("")
   const [titleInput, setTitleInput] = useState("")
   const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState("")
 
   const refresh = () => setItems(loadLibrary())
 
   const handleAddUrl = async () => {
     const url = urlInput.trim()
     if (!url) {
-      await Dialog.alert({ title: "提示", message: "请输入有效的视频地址" })
+      setStatus("请输入有效的视频地址")
       return
     }
     if (!/^https?:\/\//i.test(url) && !url.startsWith("file://")) {
-      await Dialog.alert({
-        title: "提示",
-        message: "目前仅支持 http(s) 或 file:// 链接",
-      })
+      setStatus("目前仅支持 http(s) 或 file:// 链接")
       return
     }
 
@@ -49,19 +49,24 @@ export function LibraryPage() {
     })
     setUrlInput("")
     setTitleInput("")
+    setStatus("已添加到媒体库")
     refresh()
   }
 
   const handlePickLocal = async () => {
     if (busy) return
     setBusy(true)
+    setStatus("")
     try {
       const paths = await DocumentPicker.pickFiles({
         types: ["public.movie", "public.video", "public.mpeg-4", "public.avi", "public.mpeg"],
         allowsMultipleSelection: false,
         shouldShowFileExtensions: true,
       })
-      if (!paths || paths.length === 0) return
+      if (!paths || paths.length === 0) {
+        setBusy(false)
+        return
+      }
 
       const path = paths[0]
       const fileUrl = path.startsWith("file://") ? path : `file://${path}`
@@ -71,13 +76,11 @@ export function LibraryPage() {
         sourceType: "local",
         sourceName: "本地文件",
       })
+      setStatus("本地视频已添加")
       refresh()
     } catch (e) {
       console.error("选择文件失败:", e)
-      await Dialog.alert({
-        title: "选择失败",
-        message: e instanceof Error ? e.message : "无法打开文件选择器",
-      })
+      setStatus(e instanceof Error ? e.message : "无法打开文件选择器")
     } finally {
       setBusy(false)
     }
@@ -125,34 +128,57 @@ export function LibraryPage() {
   const others = items.filter(i => !i.isFavorite)
 
   return (
-    <List
-      navigationTitle="媒体库"
-      navigationBarTitleDisplayMode="large"
-    >
-      <Section header="添加媒体">
-        <TextField
-          title="标题（可选）"
-          value={titleInput}
-          onChange={setTitleInput}
-          placeholder="留空则自动从链接提取"
-        />
-        <TextField
-          title="视频地址"
-          value={urlInput}
-          onChange={setUrlInput}
-          placeholder="https://..."
-        />
-        <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
-        <Button
-          title={busy ? "选择中..." : "选择本地视频"}
-          systemImage="folder.badge.plus"
-          action={handlePickLocal}
-        />
-      </Section>
+    <NavigationStack>
+      <List
+        navigationTitle="媒体库"
+        navigationBarTitleDisplayMode="large"
+        toolbar={pageToolbarProps()}
+      >
+        <Section header={<Text textCase={null}>添加媒体</Text>}>
+          <TextField
+            title="标题（可选）"
+            value={titleInput}
+            onChanged={setTitleInput}
+            prompt="留空则自动从链接提取"
+          />
+          <TextField
+            title="视频地址"
+            value={urlInput}
+            onChanged={setUrlInput}
+            prompt="https://..."
+          />
+          <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
+          <Button
+            title={busy ? "选择中..." : "选择本地视频"}
+            systemImage="folder.badge.plus"
+            action={handlePickLocal}
+          />
+          {status ? (
+            <Text font="caption" foregroundStyle="secondaryLabel">
+              {status}
+            </Text>
+          ) : null}
+        </Section>
 
-      {favorites.length > 0 ? (
-        <Section header="收藏">
-          {favorites.map(item => (
+        {favorites.length > 0 ? (
+          <Section header={<Text textCase={null}>收藏</Text>}>
+            {favorites.map(item => (
+              <MediaRow
+                key={item.id}
+                item={item}
+                onPlay={() => handlePlay(item)}
+                onDelete={() => handleDelete(item.id)}
+                onToggleFavorite={() => handleToggleFavorite(item.id)}
+              />
+            ))}
+          </Section>
+        ) : null}
+
+        <Section
+          header={<Text textCase={null}>{items.length > 0 ? "全部媒体" : "暂无媒体"}</Text>}
+          footer={items.length === 0 ? "添加远程 URL 或本地视频后会显示在这里" : undefined}
+        >
+          {others.map(item => (
             <MediaRow
               key={item.id}
               item={item}
@@ -162,23 +188,8 @@ export function LibraryPage() {
             />
           ))}
         </Section>
-      ) : null}
-
-      <Section
-        header={items.length > 0 ? "全部媒体" : "暂无媒体"}
-        footer={items.length === 0 ? "添加远程 URL 或本地视频后会显示在这里" : undefined}
-      >
-        {others.map(item => (
-          <MediaRow
-            key={item.id}
-            item={item}
-            onPlay={() => handlePlay(item)}
-            onDelete={() => handleDelete(item.id)}
-            onToggleFavorite={() => handleToggleFavorite(item.id)}
-          />
-        ))}
-      </Section>
-    </List>
+      </List>
+    </NavigationStack>
   )
 }
 
@@ -199,9 +210,9 @@ function MediaRow({
       : item.sourceName || item.sourceType
 
   return (
-    <HStack spacing={12} padding={{ vertical: 6 }}>
-      <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
-        <Text font="body" fontWeight="medium" lineLimit={2}>
+    <HStack spacing={10} padding={{ vertical: 6 }}>
+      <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
+        <Text fontWeight="medium" lineLimit={2}>
           {item.title}
         </Text>
         <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>
@@ -213,7 +224,7 @@ function MediaRow({
         systemImage={item.isFavorite ? "star.fill" : "star"}
         action={onToggleFavorite}
       />
-      <Button systemImage="trash" tint="systemRed" action={onDelete} />
+      <Button systemImage="trash" foregroundStyle="systemRed" action={onDelete} />
     </HStack>
   )
 }

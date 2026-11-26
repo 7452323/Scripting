@@ -8,7 +8,7 @@ import {
   useEffect,
   useState,
 } from "scripting"
-import type { MediaItem, PlaybackHistory } from "../types"
+import type { MediaItem, PlaybackHistory, RemoteMedia } from "../types"
 import { loadHistory, loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
 import { loadSourcesConfig } from "../sources/config"
@@ -18,9 +18,7 @@ import { plexListRecent } from "../sources/plex"
 export function HomePage() {
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
   const [history, setHistory] = useState<PlaybackHistory[]>(() => loadHistory())
-  const [remotePreview, setRemotePreview] = useState<
-    Array<{ id: string; title: string; url: string; sourceName: string; poster?: string }>
-  >([])
+  const [remotePreview, setRemotePreview] = useState<RemoteMedia[]>([])
 
   const refresh = () => {
     setLibrary(loadLibrary())
@@ -30,7 +28,7 @@ export function HomePage() {
   useEffect(() => {
     const cfg = loadSourcesConfig()
     ;(async () => {
-      const all: typeof remotePreview = []
+      const all: RemoteMedia[] = []
       try {
         if (cfg.emby.enabled && cfg.emby.accessToken) {
           all.push(...(await embyListLatest(cfg.emby, 10)))
@@ -49,14 +47,15 @@ export function HomePage() {
   const favorites = library.filter(i => i.isFavorite).slice(0, 8)
   const latest = library.slice(0, 8)
 
-  const playItem = async (
-    url: string,
-    title: string,
-    mediaId?: string,
+  const playItem = async (opts: {
+    url: string
+    title: string
+    mediaId?: string
     startTime?: number
-  ) => {
+    headers?: Record<string, string>
+  }) => {
     try {
-      await presentPlayer({ url, title, mediaId, startTime })
+      await presentPlayer(opts)
     } catch (e) {
       console.error(e)
     } finally {
@@ -74,12 +73,13 @@ export function HomePage() {
           <Button
             key={`${entry.mediaId}_${entry.playedAt}`}
             action={() =>
-              playItem(
-                entry.url,
-                entry.title,
-                entry.mediaId,
-                entry.progress > 5 ? entry.progress : 0
-              )
+              playItem({
+                url: entry.url,
+                title: entry.title,
+                mediaId: entry.mediaId,
+                startTime: entry.progress > 5 ? entry.progress : 0,
+                headers: entry.headers,
+              })
             }
           >
             <HStack spacing={12} padding={{ vertical: 4 }}>
@@ -103,7 +103,17 @@ export function HomePage() {
       {remotePreview.length > 0 ? (
         <Section header={<Text textCase={null}>服务器最近</Text>}>
           {remotePreview.map(item => (
-            <Button key={item.id} action={() => playItem(item.url, item.title, item.id)}>
+            <Button
+              key={item.id}
+              action={() =>
+                playItem({
+                  url: item.url,
+                  title: item.title,
+                  mediaId: item.id,
+                  headers: item.headers,
+                })
+              }
+            >
               <HStack spacing={12} padding={{ vertical: 4 }}>
                 <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
                   <Text fontWeight="medium" lineLimit={1}>
@@ -129,7 +139,15 @@ export function HomePage() {
         {favorites.map(item => (
           <Button
             key={item.id}
-            action={() => playItem(item.url, item.title, item.id, item.playProgress)}
+            action={() =>
+              playItem({
+                url: item.url,
+                title: item.title,
+                mediaId: item.id,
+                startTime: item.playProgress,
+                headers: item.headers,
+              })
+            }
           >
             <HStack spacing={12} padding={{ vertical: 4 }}>
               <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
@@ -155,7 +173,15 @@ export function HomePage() {
         {latest.map(item => (
           <Button
             key={item.id}
-            action={() => playItem(item.url, item.title, item.id, item.playProgress)}
+            action={() =>
+              playItem({
+                url: item.url,
+                title: item.title,
+                mediaId: item.id,
+                startTime: item.playProgress,
+                headers: item.headers,
+              })
+            }
           >
             <HStack spacing={12} padding={{ vertical: 4 }}>
               <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>

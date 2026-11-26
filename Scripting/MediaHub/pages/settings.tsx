@@ -2,6 +2,7 @@ import {
   Button,
   List,
   Section,
+  SecureField,
   Text,
   TextField,
   Toggle,
@@ -93,7 +94,7 @@ export function SettingsPage() {
       name: scriptName.trim() || "未命名脚本源",
       url: scriptUrl.trim(),
       enabled: true,
-      type: scriptUrl.trim().endsWith(".py") ? "py" : "js",
+      type: scriptUrl.trim().toLowerCase().endsWith(".py") ? "py" : "js",
     }
     updateSources({ scripts: [item, ...sources.scripts] })
     setScriptName("")
@@ -146,7 +147,7 @@ export function SettingsPage() {
           onChanged={v => saveEmby({ username: v })}
           prompt="用户名"
         />
-        <TextField
+        <SecureField
           title="密码"
           value={sources.emby.password}
           onChanged={v => saveEmby({ password: v })}
@@ -155,7 +156,7 @@ export function SettingsPage() {
         <Button title="登录 Emby" systemImage="person.badge.key" action={handleEmbyLogin} />
         {sources.emby.accessToken ? (
           <Text font="caption" foregroundStyle="secondaryLabel">
-            已登录 · UserId {sources.emby.userId?.slice(0, 8)}…
+            已登录 · UserId {String(sources.emby.userId || "").slice(0, 8)}…
           </Text>
         ) : null}
       </Section>
@@ -172,7 +173,7 @@ export function SettingsPage() {
           onChanged={v => savePlex({ server: v })}
           prompt="http://192.168.1.x:32400"
         />
-        <TextField
+        <SecureField
           title="Token"
           value={sources.plex.token}
           onChanged={v => savePlex({ token: v })}
@@ -203,7 +204,7 @@ export function SettingsPage() {
 
       <Section
         header={<Text textCase={null}>脚本源</Text>}
-        footer="远程 JS/PY：返回 { list: [{ title, url, poster? }] }"
+        footer="JS/JSON：返回 { list: [{ title, url, poster? }] }；示例见 samples/demo-source.js"
       >
         <TextField
           title="名称"
@@ -233,7 +234,7 @@ export function SettingsPage() {
       </Section>
 
       <Section header={<Text textCase={null}>刮削 (TMDB)</Text>}>
-        <TextField
+        <SecureField
           title="TMDB API Key"
           value={sources.tmdbApiKey}
           onChanged={v => updateSources({ tmdbApiKey: v })}
@@ -251,9 +252,9 @@ export function SettingsPage() {
 
       <Section header={<Text textCase={null}>关于</Text>}>
         <VStack alignment="leading" spacing={6} padding={{ vertical: 8 }}>
-          <Text fontWeight="semibold">MediaHub 0.2.0</Text>
+          <Text fontWeight="semibold">MediaHub 0.2.1</Text>
           <Text font="subheadline" foregroundStyle="secondaryLabel">
-            Emby / Plex / 115 / 脚本源 / TMDB 刮削已接入。播放使用系统 AVPlayer。
+            Emby / Plex / 115 / 脚本源 / TMDB。播放使用系统 AVPlayer，支持鉴权请求头。
           </Text>
         </VStack>
       </Section>

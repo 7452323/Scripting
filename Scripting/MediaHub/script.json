@@ -1,27 +1,27 @@
 {
-  "entry" : "index.tsx",
-  "author" : {
-    "name" : "7452323",
-    "email" : "7452323@gmail.com",
-    "homepage" : "https://github.com/7452323"
+  "entry": "index.tsx",
+  "author": {
+    "name": "7452323",
+    "email": "7452323@gmail.com",
+    "homepage": "https://github.com/7452323"
   },
-  "remoteResource" : null,
-  "contributors" : [],
-  "permissions" : null,
-  "localizedNames" : {
-    "en" : "MediaHub",
-    "zh" : "MediaHub"
+  "remoteResource": null,
+  "contributors": [],
+  "permissions": null,
+  "localizedNames": {
+    "en": "MediaHub",
+    "zh": "MediaHub"
   },
-  "description" : "全能媒体播放器：Emby / Plex / 115 / 脚本源 / 本地与直链播放",
-  "runInApp" : false,
-  "name" : "MediaHub",
-  "localizedDescriptions" : {
-    "en" : "Universal media player with Emby, Plex, 115, script sources and native playback",
-    "zh" : "全能媒体播放器：Emby / Plex / 115 / 脚本源 / 本地与直链播放"
+  "description": "全能媒体播放器：Emby / Plex / 115 / 脚本源 / 本地与直链播放",
+  "runInApp": false,
+  "name": "MediaHub",
+  "localizedDescriptions": {
+    "en": "Universal media player with Emby, Plex, 115, script sources and native playback",
+    "zh": "全能媒体播放器：Emby / Plex / 115 / 脚本源 / 本地与直链播放"
   },
-  "color" : "rgba(88, 86, 214, 1)",
-  "icon" : "play.rectangle.on.rectangle.fill",
-  "intentInputTypes" : [],
-  "version" : "0.2.0",
-  "iconImage" : null
+  "color": "rgba(88, 86, 214, 1)",
+  "icon": "play.rectangle.on.rectangle.fill",
+  "intentInputTypes": [],
+  "version": "0.2.1",
+  "iconImage": null
 }

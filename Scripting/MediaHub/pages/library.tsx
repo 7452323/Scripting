@@ -11,7 +11,7 @@ import {
   useEffect,
   useState,
 } from "scripting"
-import type { MediaItem } from "../types"
+import type { MediaItem, RemoteMedia } from "../types"
 import {
   addMediaItem,
   loadLibrary,
@@ -28,9 +28,7 @@ import { scrapeTMDB } from "../sources/scrape"
 
 export function LibraryPage() {
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
-  const [remote, setRemote] = useState<
-    Array<{ id: string; title: string; url: string; poster?: string; sourceName: string; extra?: any; sourceType: string }>
-  >([])
+  const [remote, setRemote] = useState<RemoteMedia[]>([])
   const [urlInput, setUrlInput] = useState("")
   const [titleInput, setTitleInput] = useState("")
   const [busy, setBusy] = useState(false)
@@ -40,45 +38,48 @@ export function LibraryPage() {
 
   const refreshRemote = async () => {
     const cfg = loadSourcesConfig()
-    const all: typeof remote = []
+    const all: RemoteMedia[] = []
+    const errors: string[] = []
     setStatus("正在同步源...")
-    try {
-      if (cfg.emby.enabled && cfg.emby.accessToken) {
-        try {
-          const list = await embyListLatest(cfg.emby)
-          all.push(...list)
-        } catch (e: any) {
-          console.error("Emby", e)
-        }
+
+    if (cfg.emby.enabled && cfg.emby.accessToken) {
+      try {
+        all.push(...(await embyListLatest(cfg.emby)))
+      } catch (e: any) {
+        errors.push(`Emby: ${e?.message || e}`)
       }
-      if (cfg.plex.enabled && cfg.plex.token) {
-        try {
-          const list = await plexListRecent(cfg.plex)
-          all.push(...list)
-        } catch (e: any) {
-          console.error("Plex", e)
-        }
+    }
+    if (cfg.plex.enabled && cfg.plex.token) {
+      try {
+        all.push(...(await plexListRecent(cfg.plex)))
+      } catch (e: any) {
+        errors.push(`Plex: ${e?.message || e}`)
       }
-      if (cfg.cloud115.enabled && cfg.cloud115.cookie) {
-        try {
-          const list = await cloud115ListVideos(cfg.cloud115)
-          all.push(...list)
-        } catch (e: any) {
-          console.error("115", e)
-        }
+    }
+    if (cfg.cloud115.enabled && cfg.cloud115.cookie) {
+      try {
+        all.push(...(await cloud115ListVideos(cfg.cloud115)))
+      } catch (e: any) {
+        errors.push(`115: ${e?.message || e}`)
       }
-      for (const s of cfg.scripts.filter(x => x.enabled)) {
-        try {
-          const list = await loadScriptSource(s)
-          all.push(...list)
-        } catch (e: any) {
-          console.error("script", s.name, e)
-        }
+    }
+    for (const s of cfg.scripts.filter(x => x.enabled)) {
+      try {
+        all.push(...(await loadScriptSource(s)))
+      } catch (e: any) {
+        errors.push(`${s.name}: ${e?.message || e}`)
       }
-      setRemote(all)
-      setStatus(all.length ? `已加载 ${all.length} 条远程媒体` : "暂无远程媒体（请先在设置中配置源）")
-    } catch (e: any) {
-      setStatus(e?.message || "同步失败")
+    }
+
+    setRemote(all)
+    if (all.length) {
+      setStatus(
+        errors.length
+          ? `已加载 ${all.length} 条（部分源失败：${errors[0]}）`
+          : `已加载 ${all.length} 条远程媒体`
+      )
+    } else {
+      setStatus(errors[0] || "暂无远程媒体（请先在设置中配置源）")
     }
   }
 
@@ -158,6 +159,7 @@ export function LibraryPage() {
         poster: item.poster,
         mediaId: item.id,
         startTime: item.playProgress,
+        headers: item.headers,
       })
     } catch (e: any) {
       await Dialog.alert({ title: "播放失败", message: e?.message || "无法播放" })
@@ -166,21 +168,28 @@ export function LibraryPage() {
     }
   }
 
-  const playRemote = async (item: (typeof remote)[0]) => {
+  const playRemote = async (item: RemoteMedia) => {
     try {
       let url = item.url
+      let playHeaders = item.headers
+
       if (item.sourceType === "115") {
         const cfg = loadSourcesConfig()
         const pick = item.extra?.pickCode
         if (!pick) throw new Error("缺少 pickCode")
-        url = await cloud115GetPlayUrl(cfg.cloud115, pick)
+        const got = await cloud115GetPlayUrl(cfg.cloud115, pick)
+        url = got.url
+        playHeaders = got.headers
       }
+
       if (!url) throw new Error("无播放地址")
+
       await presentPlayer({
         url,
         title: item.title,
         poster: item.poster,
         mediaId: item.id,
+        headers: playHeaders,
       })
     } catch (e: any) {
       await Dialog.alert({ title: "播放失败", message: e?.message || "无法播放" })
@@ -275,7 +284,11 @@ export function LibraryPage() {
 
       <Section
         header={<Text textCase={null}>{items.length > 0 ? "本地媒体库" : "本地媒体库为空"}</Text>}
-        footer={items.length === 0 ? "添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源" : undefined}
+        footer={
+          items.length === 0
+            ? "添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源"
+            : undefined
+        }
       >
         {others.map(item => (
           <LocalRow

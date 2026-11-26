@@ -9,7 +9,7 @@ import {
   useMemo,
   useState,
 } from "scripting"
-import type { MediaItem } from "../types"
+import type { MediaItem, RemoteMedia } from "../types"
 import { loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
 import { loadSourcesConfig } from "../sources/config"
@@ -21,9 +21,7 @@ import { cloud115GetPlayUrl } from "../sources/cloud115"
 export function SearchPage() {
   const [query, setQuery] = useState("")
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
-  const [remote, setRemote] = useState<
-    Array<{ id: string; title: string; url: string; sourceName: string; sourceType: string; extra?: any }>
-  >([])
+  const [remote, setRemote] = useState<RemoteMedia[]>([])
   const [searching, setSearching] = useState(false)
   const [status, setStatus] = useState("")
 
@@ -47,31 +45,37 @@ export function SearchPage() {
     setSearching(true)
     setStatus("搜索中...")
     const cfg = loadSourcesConfig()
-    const all: typeof remote = []
+    const all: RemoteMedia[] = []
+    const errors: string[] = []
+
     try {
       if (cfg.emby.enabled && cfg.emby.accessToken) {
         try {
           all.push(...(await embySearch(cfg.emby, q)))
-        } catch (e) {
-          console.error(e)
+        } catch (e: any) {
+          errors.push(`Emby: ${e?.message || e}`)
         }
       }
       if (cfg.plex.enabled && cfg.plex.token) {
         try {
           all.push(...(await plexSearch(cfg.plex, q)))
-        } catch (e) {
-          console.error(e)
+        } catch (e: any) {
+          errors.push(`Plex: ${e?.message || e}`)
         }
       }
       for (const s of cfg.scripts.filter(x => x.enabled)) {
         try {
           all.push(...(await loadScriptSource(s, q)))
-        } catch (e) {
-          console.error(e)
+        } catch (e: any) {
+          errors.push(`${s.name}: ${e?.message || e}`)
         }
       }
       setRemote(all)
-      setStatus(`本地 ${localResults.length} · 远程 ${all.length}`)
+      setStatus(
+        errors.length
+          ? `本地 ${localResults.length} · 远程 ${all.length}（${errors[0]}）`
+          : `本地 ${localResults.length} · 远程 ${all.length}`
+      )
     } finally {
       setSearching(false)
       setLibrary(loadLibrary())
@@ -84,18 +88,27 @@ export function SearchPage() {
       title: item.title,
       mediaId: item.id,
       startTime: item.playProgress,
+      headers: item.headers,
     })
     setLibrary(loadLibrary())
   }
 
-  const playRemote = async (item: (typeof remote)[0]) => {
+  const playRemote = async (item: RemoteMedia) => {
     try {
       let url = item.url
+      let playHeaders = item.headers
       if (item.sourceType === "115") {
         const cfg = loadSourcesConfig()
-        url = await cloud115GetPlayUrl(cfg.cloud115, item.extra?.pickCode)
+        const got = await cloud115GetPlayUrl(cfg.cloud115, item.extra?.pickCode)
+        url = got.url
+        playHeaders = got.headers
       }
-      await presentPlayer({ url, title: item.title, mediaId: item.id })
+      await presentPlayer({
+        url,
+        title: item.title,
+        mediaId: item.id,
+        headers: playHeaders,
+      })
     } catch (e: any) {
       setStatus(e?.message || "播放失败")
     }

@@ -1,65 +1,14 @@
-import {
-  Button,
-  Image,
-  Navigation,
-  Script,
-  Toolbar,
-  ToolbarItem,
-} from "scripting"
+import { Button, Script } from "scripting"
 
-/** 各页面共用的顶部关闭 / 最小化工具栏 */
-export function PageToolbar(extraTrailing?: any) {
-  const dismiss = Navigation.useDismiss()
-
-  return (
-    <Toolbar>
-      <ToolbarItem placement="topBarLeading" sharedBackgroundVisibility="visible">
-        <Button
-          action={() => dismiss()}
-          buttonStyle="plain"
-          frame={{ width: 44, height: 44 }}
-          contentShape="rect"
-          accessibilityLabel="关闭"
-        >
-          <Image systemName="xmark" font="headline" foregroundStyle="label" />
-        </Button>
-      </ToolbarItem>
-
-      {extraTrailing}
-
-      {Script.supportsMinimization() ? (
-        <ToolbarItem placement="topBarTrailing" sharedBackgroundVisibility="visible">
-          <Button
-            action={() => {
-              if (!Script.isMinimized()) {
-                Script.minimize().catch(() => {})
-              }
-            }}
-            buttonStyle="plain"
-            frame={{ width: 44, height: 44 }}
-            contentShape="rect"
-            accessibilityLabel="最小化"
-          >
-            <Image
-              systemName="arrow.down.right.and.arrow.up.left"
-              font="headline"
-              foregroundStyle="label"
-            />
-          </Button>
-        </ToolbarItem>
-      ) : null}
-    </Toolbar>
-  )
-}
-
-/** 对象形式 toolbar（部分 List 更稳） */
-export function pageToolbarProps(extraTrailing?: any[]) {
-  const dismiss = Navigation.useDismiss()
-  const trailing: any[] = []
-
-  if (extraTrailing && extraTrailing.length) {
-    trailing.push(...extraTrailing)
-  }
+/**
+ * 构建 List 可用的 toolbar 对象。
+ * dismiss 必须由页面组件顶层通过 Navigation.useDismiss() 取得后再传入。
+ */
+export function buildPageToolbar(
+  dismiss: () => void,
+  extraTrailing: any[] = []
+) {
+  const trailing: any[] = [...extraTrailing]
 
   if (Script.supportsMinimization()) {
     trailing.push(
@@ -77,11 +26,7 @@ export function pageToolbarProps(extraTrailing?: any[]) {
 
   return {
     topBarLeading: [
-      <Button
-        key="close"
-        systemImage="xmark"
-        action={() => dismiss()}
-      />,
+      <Button key="close" systemImage="xmark" action={() => dismiss()} />,
     ],
     topBarTrailing: trailing,
   }

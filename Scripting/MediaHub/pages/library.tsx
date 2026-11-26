@@ -4,6 +4,7 @@ import {
   DocumentPicker,
   HStack,
   List,
+  Navigation,
   NavigationStack,
   Section,
   Text,
@@ -19,9 +20,10 @@ import {
   toggleFavorite,
 } from "../storage"
 import { presentPlayer } from "../player"
-import { pageToolbarProps } from "./toolbar"
+import { buildPageToolbar } from "./toolbar"
 
 export function LibraryPage() {
+  const dismiss = Navigation.useDismiss()
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
   const [urlInput, setUrlInput] = useState("")
   const [titleInput, setTitleInput] = useState("")
@@ -132,7 +134,7 @@ export function LibraryPage() {
       <List
         navigationTitle="媒体库"
         navigationBarTitleDisplayMode="large"
-        toolbar={pageToolbarProps()}
+        toolbar={buildPageToolbar(dismiss)}
       >
         <Section header={<Text textCase={null}>添加媒体</Text>}>
           <TextField

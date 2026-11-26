@@ -1,5 +1,6 @@
 import {
   List,
+  Navigation,
   NavigationStack,
   Section,
   Text,
@@ -8,9 +9,10 @@ import {
   useState,
 } from "scripting"
 import { loadSettings, saveSettings, type AppSettings } from "../storage"
-import { pageToolbarProps } from "./toolbar"
+import { buildPageToolbar } from "./toolbar"
 
 export function SettingsPage() {
+  const dismiss = Navigation.useDismiss()
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
 
   const update = (patch: Partial<AppSettings>) => {
@@ -24,7 +26,7 @@ export function SettingsPage() {
       <List
         navigationTitle="设置"
         navigationBarTitleDisplayMode="large"
-        toolbar={pageToolbarProps()}
+        toolbar={buildPageToolbar(dismiss)}
       >
         <Section header={<Text textCase={null}>播放</Text>}>
           <Toggle

@@ -2,6 +2,7 @@ import {
   Button,
   HStack,
   List,
+  Navigation,
   NavigationStack,
   Section,
   Text,
@@ -13,9 +14,10 @@ import {
 import type { MediaItem } from "../types"
 import { loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
-import { pageToolbarProps } from "./toolbar"
+import { buildPageToolbar } from "./toolbar"
 
 export function SearchPage() {
+  const dismiss = Navigation.useDismiss()
   const [query, setQuery] = useState("")
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
 
@@ -50,7 +52,7 @@ export function SearchPage() {
       <List
         navigationTitle="搜索"
         navigationBarTitleDisplayMode="large"
-        toolbar={pageToolbarProps()}
+        toolbar={buildPageToolbar(dismiss)}
       >
         <Section header={<Text textCase={null}>关键词</Text>}>
           <TextField

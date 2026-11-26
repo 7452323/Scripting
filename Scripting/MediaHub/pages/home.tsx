@@ -2,6 +2,7 @@ import {
   Button,
   HStack,
   List,
+  Navigation,
   NavigationStack,
   Section,
   Text,
@@ -11,9 +12,10 @@ import {
 import type { MediaItem, PlaybackHistory } from "../types"
 import { loadHistory, loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
-import { pageToolbarProps } from "./toolbar"
+import { buildPageToolbar } from "./toolbar"
 
 export function HomePage() {
+  const dismiss = Navigation.useDismiss()
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
   const [history, setHistory] = useState<PlaybackHistory[]>(() => loadHistory())
 
@@ -26,7 +28,12 @@ export function HomePage() {
   const favorites = library.filter(i => i.isFavorite).slice(0, 8)
   const latest = library.slice(0, 8)
 
-  const playItem = async (url: string, title: string, mediaId?: string, startTime?: number) => {
+  const playItem = async (
+    url: string,
+    title: string,
+    mediaId?: string,
+    startTime?: number
+  ) => {
     try {
       await presentPlayer({ url, title, mediaId, startTime })
     } catch (e) {
@@ -41,7 +48,7 @@ export function HomePage() {
       <List
         navigationTitle="MediaHub"
         navigationBarTitleDisplayMode="large"
-        toolbar={pageToolbarProps([
+        toolbar={buildPageToolbar(dismiss, [
           <Button key="refresh" systemImage="arrow.clockwise" action={refresh} />,
         ])}
       >

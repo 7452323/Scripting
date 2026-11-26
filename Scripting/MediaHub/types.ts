@@ -1,4 +1,4 @@
-/** MediaHub 共享类型定义 */
+/** MediaHub 共享类型 */
 
 export type MediaSourceType =
   | "local"
@@ -20,7 +20,8 @@ export interface MediaItem {
   lastPlayedAt?: number
   playProgress?: number
   isFavorite?: boolean
-  /** 未来扩展字段 */
+  /** 鉴权请求头（如 115 Cookie） */
+  headers?: Record<string, string>
   extra?: Record<string, any>
 }
 
@@ -32,6 +33,7 @@ export interface PlaybackHistory {
   progress: number
   duration: number
   playedAt: number
+  headers?: Record<string, string>
 }
 
 export interface PlayerOptions {
@@ -43,4 +45,16 @@ export interface PlayerOptions {
   startTime?: number
   onProgress?: (progress: number, duration: number) => void
   onEnded?: () => void
+}
+
+/** 远程源统一条目 */
+export interface RemoteMedia {
+  id: string
+  title: string
+  url: string
+  poster?: string
+  sourceType: MediaSourceType
+  sourceName: string
+  headers?: Record<string, string>
+  extra?: Record<string, any>
 }

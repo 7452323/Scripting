@@ -1,24 +1,11 @@
 import type { ScriptSourceConfig } from "./config"
-
-export interface RemoteMedia {
-  id: string
-  title: string
-  url: string
-  poster?: string
-  sourceType: "script"
-  sourceName: string
-  extra?: Record<string, any>
-}
+import type { RemoteMedia } from "../types"
 
 /**
- * 脚本源约定（JS）：
- * 远程/本地脚本应导出或返回 JSON：
- * {
- *   list: [{ title, url, poster? }]
- * }
- * 或数组本身。
- *
- * Python 源：执行后 stdout 打印同样结构的 JSON。
+ * 脚本源约定：
+ * - JS：定义 main(query) / getList(query)，返回 { list: [{ title, url, poster? }] } 或数组
+ * - 也可直接是 JSON 文件
+ * - Python：定义 main(q)/get_list(q)，环境支持时执行
  */
 export async function loadScriptSource(
   source: ScriptSourceConfig,
@@ -26,21 +13,15 @@ export async function loadScriptSource(
 ): Promise<RemoteMedia[]> {
   if (!source.url) throw new Error("脚本源地址为空")
 
-  let code = ""
-  if (/^https?:\/\//i.test(source.url)) {
-    const res = await fetch(source.url)
-    if (!res.ok) throw new Error(`下载脚本失败 (${res.status})`)
-    code = await res.text()
-  } else {
-    // 本地路径
-    const path = source.url.startsWith("file://") ? source.url.replace(/^file:\/\//, "") : source.url
-    const data = FileManager.readAsString?.(path) || (await (FileManager as any).readString?.(path))
-    if (!data) {
-      // 兼容同步/异步 API
-      const raw = await fetch(path.startsWith("/") ? `file://${path}` : path)
-      code = await raw.text()
-    } else {
-      code = data
+  const code = await fetchSourceText(source.url)
+
+  // 纯 JSON 源
+  const trimmed = code.trim()
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return normalizeList(source, JSON.parse(trimmed))
+    } catch {
+      // 继续当脚本执行
     }
   }
 
@@ -50,34 +31,74 @@ export async function loadScriptSource(
   return runJsSource(source, code, query)
 }
 
+async function fetchSourceText(url: string): Promise<string> {
+  if (/^https?:\/\//i.test(url)) {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`下载脚本失败 (${res.status})`)
+    return await res.text()
+  }
+
+  const path = url.startsWith("file://") ? url.slice("file://".length) : url
+
+  try {
+    if (typeof FileManager !== "undefined") {
+      const fm: any = FileManager
+      if (typeof fm.readAsString === "function") {
+        const s = await Promise.resolve(fm.readAsString(path))
+        if (s) return s
+      }
+      if (typeof fm.readString === "function") {
+        const s = await Promise.resolve(fm.readString(path))
+        if (s) return s
+      }
+      if (typeof fm.read === "function") {
+        const s = await Promise.resolve(fm.read(path))
+        if (typeof s === "string" && s) return s
+      }
+    }
+  } catch (e) {
+    console.warn("FileManager 读取失败，尝试 fetch", e)
+  }
+
+  const fileUrl = path.startsWith("/") ? `file://${path}` : path
+  const res = await fetch(fileUrl)
+  if (!res.ok) throw new Error(`读取本地脚本失败 (${res.status})`)
+  return await res.text()
+}
+
 async function runJsSource(
   source: ScriptSourceConfig,
   code: string,
   query?: string
 ): Promise<RemoteMedia[]> {
-  // 在受控函数中执行，要求脚本定义 main 或默认返回 list
   const runner = new Function(
     "query",
     "fetch",
+    "console",
     `
     "use strict";
+    var module = { exports: {} };
+    var exports = module.exports;
+    var result;
     ${code}
     if (typeof main === "function") return main(query);
     if (typeof getList === "function") return getList(query);
-    if (typeof module !== "undefined" && module.exports) return module.exports;
+    if (module.exports && (module.exports.list || Array.isArray(module.exports) || typeof module.exports === "function")) {
+      if (typeof module.exports === "function") return module.exports(query);
+      return module.exports;
+    }
     if (typeof result !== "undefined") return result;
     return null;
   `
   )
 
-  let result: any
+  let out: any
   try {
-    result = await Promise.resolve(runner(query || "", fetch))
+    out = await Promise.resolve(runner(query || "", fetch, console))
   } catch (e: any) {
     throw new Error(`脚本执行失败: ${e?.message || e}`)
   }
-
-  return normalizeList(source, result)
+  return normalizeList(source, out)
 }
 
 async function runPythonSource(
@@ -85,10 +106,9 @@ async function runPythonSource(
   code: string,
   query?: string
 ): Promise<RemoteMedia[]> {
-  // Scripting Python 桥：若环境支持 Python.eval / Python.run
   const py = (globalThis as any).Python
   if (!py) {
-    throw new Error("当前环境未启用 Python，请改用 JS 脚本源")
+    throw new Error("当前环境未启用 Python，请改用 JS 脚本源或 JSON 源")
   }
 
   const wrapped =
@@ -98,11 +118,11 @@ async function runPythonSource(
 import json
 q = ${JSON.stringify(query || "")}
 out = None
-if "main" in dir():
+if "main" in globals() and callable(main):
     out = main(q)
-elif "get_list" in dir():
+elif "get_list" in globals() and callable(get_list):
     out = get_list(q)
-print(json.dumps(out, ensure_ascii=False))
+print("__MEDIAHUB_JSON__" + json.dumps(out, ensure_ascii=False))
 `
 
   let stdout = ""
@@ -114,28 +134,32 @@ print(json.dumps(out, ensure_ascii=False))
     throw new Error("Python API 不可用")
   }
 
-  const lines = stdout.trim().split("\n")
-  const last = lines[lines.length - 1]
-  const parsed = JSON.parse(last)
-  return normalizeList(source, parsed)
+  const marker = "__MEDIAHUB_JSON__"
+  const idx = stdout.lastIndexOf(marker)
+  if (idx === -1) throw new Error("Python 脚本未输出结果 JSON")
+  const jsonText = stdout.slice(idx + marker.length).trim()
+  return normalizeList(source, JSON.parse(jsonText))
 }
 
 function normalizeList(source: ScriptSourceConfig, result: any): RemoteMedia[] {
+  if (result == null) throw new Error("脚本未返回数据")
+
   let list: any[] = []
   if (Array.isArray(result)) list = result
-  else if (result && Array.isArray(result.list)) list = result.list
-  else if (result && Array.isArray(result.data)) list = result.data
+  else if (Array.isArray(result.list)) list = result.list
+  else if (Array.isArray(result.data)) list = result.data
   else throw new Error("脚本未返回 list 数组")
 
   return list
-    .filter(item => item && (item.url || item.playUrl))
+    .filter(item => item && (item.url || item.playUrl || item.play_url))
     .map((item, index) => ({
       id: `script_${source.id}_${item.id || index}`,
-      title: item.title || item.name || `条目 ${index + 1}`,
-      url: item.url || item.playUrl,
+      title: String(item.title || item.name || `条目 ${index + 1}`),
+      url: String(item.url || item.playUrl || item.play_url),
       poster: item.poster || item.cover || item.pic,
       sourceType: "script" as const,
       sourceName: source.name || "脚本源",
+      headers: item.headers && typeof item.headers === "object" ? item.headers : undefined,
       extra: item,
     }))
 }

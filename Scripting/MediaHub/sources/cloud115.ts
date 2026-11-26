@@ -1,46 +1,29 @@
 import type { Cloud115Config } from "./config"
-
-export interface RemoteMedia {
-  id: string
-  title: string
-  url: string
-  poster?: string
-  sourceType: "115"
-  sourceName: string
-  extra?: Record<string, any>
-}
+import type { RemoteMedia } from "../types"
 
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
 
-function headers(cookie: string) {
+function headers(cookie: string): Record<string, string> {
   return {
     "User-Agent": UA,
     Cookie: cookie,
     Accept: "application/json, text/plain, */*",
+    Referer: "https://115.com/",
   }
 }
 
-/** 校验 Cookie 是否有效 */
 export async function cloud115Check(config: Cloud115Config): Promise<string> {
   if (!config.cookie.trim()) throw new Error("请填写 115 Cookie")
-  const res = await fetch("https://my.115.com/?ct=ajax&ac=nav", {
-    headers: headers(config.cookie),
-  })
-  const data = await res.json().catch(() => null)
-  if (data && (data.state === true || data.user_id || data.data)) {
-    return "Cookie 有效"
-  }
-  // 备选校验
+
   const res2 = await fetch("https://webapi.115.com/files?offset=0&limit=1&show_dir=1", {
     headers: headers(config.cookie),
   })
   const data2 = await res2.json().catch(() => null)
   if (data2 && data2.state === true) return "Cookie 有效"
-  throw new Error(data2?.error || data?.error || "Cookie 无效或已过期")
+  throw new Error(data2?.error || data2?.msg || "Cookie 无效或已过期")
 }
 
-/** 列出视频文件（简化：根目录与一级文件夹中的视频） */
 export async function cloud115ListVideos(
   config: Cloud115Config,
   cid = "0",
@@ -54,18 +37,22 @@ export async function cloud115ListVideos(
   )
   const data = await res.json()
   if (!data || data.state !== true) {
-    throw new Error(data?.error || "115 文件列表获取失败")
+    throw new Error(data?.error || data?.msg || "115 文件列表获取失败")
   }
 
   const files = data.data || []
   const videos: RemoteMedia[] = []
+  const videoExt = /\.(mp4|mkv|avi|mov|m3u8|ts|flv|wmv|m4v|webm|rmvb)$/i
 
   for (const f of files) {
-    // 文件夹跳过；也可递归，这里先只取视频文件
+    const name = f.n || f.file_name || ""
+    const isDir = f.fc === 1 || f.pid === undefined && f.cid && !f.fid
+    if (isDir) continue
+
     const isVideo =
-      f.fc === 0 &&
-      (String(f.class || "").includes("video") ||
-        /\.(mp4|mkv|avi|mov|m3u8|ts|flv|wmv|m4v)$/i.test(f.n || ""))
+      videoExt.test(name) ||
+      String(f.class || "").toLowerCase().includes("video") ||
+      String(f.ico || "").toLowerCase() === "avi"
 
     if (!isVideo) continue
 
@@ -74,10 +61,11 @@ export async function cloud115ListVideos(
 
     videos.push({
       id: `115_${f.fid || pickCode}`,
-      title: f.n || "未命名",
+      title: name || "未命名",
       url: "",
       sourceType: "115",
       sourceName: "115网盘",
+      headers: { Cookie: config.cookie, Referer: "https://115.com/", "User-Agent": UA },
       extra: { pickCode, fid: f.fid },
     })
   }
@@ -85,41 +73,50 @@ export async function cloud115ListVideos(
   return videos
 }
 
-/** 根据 pickcode 获取直链 */
 export async function cloud115GetPlayUrl(
   config: Cloud115Config,
   pickCode: string
-): Promise<string> {
+): Promise<{ url: string; headers: Record<string, string> }> {
   if (!config.cookie.trim()) throw new Error("请先配置 115 Cookie")
+  if (!pickCode) throw new Error("缺少 pickCode")
 
-  // 使用 115 下载/播放接口（可能随官方变更）
+  const h = headers(config.cookie)
+
   const res = await fetch(
     `https://proapi.115.com/app/chrome/downurl?pickcode=${encodeURIComponent(pickCode)}`,
-    { headers: headers(config.cookie) }
+    { headers: h }
   )
   const data = await res.json().catch(() => null)
 
-  // 兼容多种返回结构
-  const url =
+  let url: string | null =
     data?.data?.[pickCode]?.url?.url ||
+    data?.data?.url?.url ||
     data?.data?.url ||
     data?.url ||
     null
 
-  if (url) return url
+  if (!url) {
+    const res2 = await fetch("https://webapi.115.com/files/download", {
+      method: "POST",
+      headers: {
+        ...h,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: `pick_code=${encodeURIComponent(pickCode)}`,
+    })
+    const data2 = await res2.json().catch(() => null)
+    url = data2?.data?.url || data2?.url || null
+    if (!url) {
+      throw new Error(data?.error || data2?.error || "无法获取 115 播放直链，请检查 Cookie 权限")
+    }
+  }
 
-  // 备用：webapi files download
-  const res2 = await fetch("https://webapi.115.com/files/download", {
-    method: "POST",
+  return {
+    url,
     headers: {
-      ...headers(config.cookie),
-      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: config.cookie,
+      Referer: "https://115.com/",
+      "User-Agent": UA,
     },
-    body: `pick_code=${encodeURIComponent(pickCode)}`,
-  })
-  const data2 = await res2.json().catch(() => null)
-  const url2 = data2?.data?.url || data2?.url
-  if (url2) return url2
-
-  throw new Error(data?.error || data2?.error || "无法获取 115 播放直链，请检查 Cookie 权限")
+  }
 }

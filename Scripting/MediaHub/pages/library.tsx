@@ -4,12 +4,11 @@ import {
   DocumentPicker,
   HStack,
   List,
-  Navigation,
-  NavigationStack,
   Section,
   Text,
   TextField,
   VStack,
+  useEffect,
   useState,
 } from "scripting"
 import type { MediaItem } from "../types"
@@ -20,17 +19,72 @@ import {
   toggleFavorite,
 } from "../storage"
 import { presentPlayer } from "../player"
-import { buildPageToolbar } from "./toolbar"
+import { loadSourcesConfig } from "../sources/config"
+import { embyListLatest } from "../sources/emby"
+import { plexListRecent } from "../sources/plex"
+import { cloud115GetPlayUrl, cloud115ListVideos } from "../sources/cloud115"
+import { loadScriptSource } from "../sources/scriptSource"
+import { scrapeTMDB } from "../sources/scrape"
 
 export function LibraryPage() {
-  const dismiss = Navigation.useDismiss()
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
+  const [remote, setRemote] = useState<
+    Array<{ id: string; title: string; url: string; poster?: string; sourceName: string; extra?: any; sourceType: string }>
+  >([])
   const [urlInput, setUrlInput] = useState("")
   const [titleInput, setTitleInput] = useState("")
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState("")
 
-  const refresh = () => setItems(loadLibrary())
+  const refreshLocal = () => setItems(loadLibrary())
+
+  const refreshRemote = async () => {
+    const cfg = loadSourcesConfig()
+    const all: typeof remote = []
+    setStatus("正在同步源...")
+    try {
+      if (cfg.emby.enabled && cfg.emby.accessToken) {
+        try {
+          const list = await embyListLatest(cfg.emby)
+          all.push(...list)
+        } catch (e: any) {
+          console.error("Emby", e)
+        }
+      }
+      if (cfg.plex.enabled && cfg.plex.token) {
+        try {
+          const list = await plexListRecent(cfg.plex)
+          all.push(...list)
+        } catch (e: any) {
+          console.error("Plex", e)
+        }
+      }
+      if (cfg.cloud115.enabled && cfg.cloud115.cookie) {
+        try {
+          const list = await cloud115ListVideos(cfg.cloud115)
+          all.push(...list)
+        } catch (e: any) {
+          console.error("115", e)
+        }
+      }
+      for (const s of cfg.scripts.filter(x => x.enabled)) {
+        try {
+          const list = await loadScriptSource(s)
+          all.push(...list)
+        } catch (e: any) {
+          console.error("script", s.name, e)
+        }
+      }
+      setRemote(all)
+      setStatus(all.length ? `已加载 ${all.length} 条远程媒体` : "暂无远程媒体（请先在设置中配置源）")
+    } catch (e: any) {
+      setStatus(e?.message || "同步失败")
+    }
+  }
+
+  useEffect(() => {
+    refreshRemote().catch(() => {})
+  }, [])
 
   const handleAddUrl = async () => {
     const url = urlInput.trim()
@@ -43,33 +97,42 @@ export function LibraryPage() {
       return
     }
 
+    let title = titleInput.trim() || extractTitleFromUrl(url)
+    let poster: string | undefined
+    const cfg = loadSourcesConfig()
+    if (cfg.tmdbApiKey && title) {
+      try {
+        const scraped = await scrapeTMDB(cfg.tmdbApiKey, title)
+        if (scraped) {
+          title = scraped.title
+          poster = scraped.poster
+        }
+      } catch {}
+    }
+
     addMediaItem({
-      title: titleInput.trim() || extractTitleFromUrl(url),
+      title,
       url,
+      poster,
       sourceType: url.startsWith("file://") ? "local" : "url",
       sourceName: "手动添加",
     })
     setUrlInput("")
     setTitleInput("")
     setStatus("已添加到媒体库")
-    refresh()
+    refreshLocal()
   }
 
   const handlePickLocal = async () => {
     if (busy) return
     setBusy(true)
-    setStatus("")
     try {
       const paths = await DocumentPicker.pickFiles({
         types: ["public.movie", "public.video", "public.mpeg-4", "public.avi", "public.mpeg"],
         allowsMultipleSelection: false,
         shouldShowFileExtensions: true,
       })
-      if (!paths || paths.length === 0) {
-        setBusy(false)
-        return
-      }
-
+      if (!paths || paths.length === 0) return
       const path = paths[0]
       const fileUrl = path.startsWith("file://") ? path : `file://${path}`
       addMediaItem({
@@ -79,16 +142,15 @@ export function LibraryPage() {
         sourceName: "本地文件",
       })
       setStatus("本地视频已添加")
-      refresh()
-    } catch (e) {
-      console.error("选择文件失败:", e)
-      setStatus(e instanceof Error ? e.message : "无法打开文件选择器")
+      refreshLocal()
+    } catch (e: any) {
+      setStatus(e?.message || "选择失败")
     } finally {
       setBusy(false)
     }
   }
 
-  const handlePlay = async (item: MediaItem) => {
+  const playLocal = async (item: MediaItem) => {
     try {
       await presentPlayer({
         url: item.url,
@@ -97,14 +159,33 @@ export function LibraryPage() {
         mediaId: item.id,
         startTime: item.playProgress,
       })
-    } catch (e) {
-      console.error("播放失败:", e)
-      await Dialog.alert({
-        title: "播放失败",
-        message: e instanceof Error ? e.message : "无法播放该媒体",
-      })
+    } catch (e: any) {
+      await Dialog.alert({ title: "播放失败", message: e?.message || "无法播放" })
     } finally {
-      refresh()
+      refreshLocal()
+    }
+  }
+
+  const playRemote = async (item: (typeof remote)[0]) => {
+    try {
+      let url = item.url
+      if (item.sourceType === "115") {
+        const cfg = loadSourcesConfig()
+        const pick = item.extra?.pickCode
+        if (!pick) throw new Error("缺少 pickCode")
+        url = await cloud115GetPlayUrl(cfg.cloud115, pick)
+      }
+      if (!url) throw new Error("无播放地址")
+      await presentPlayer({
+        url,
+        title: item.title,
+        poster: item.poster,
+        mediaId: item.id,
+      })
+    } catch (e: any) {
+      await Dialog.alert({ title: "播放失败", message: e?.message || "无法播放" })
+    } finally {
+      refreshLocal()
     }
   }
 
@@ -117,85 +198,103 @@ export function LibraryPage() {
     })
     if (ok) {
       removeMediaItem(id)
-      refresh()
+      refreshLocal()
     }
-  }
-
-  const handleToggleFavorite = (id: string) => {
-    toggleFavorite(id)
-    refresh()
   }
 
   const favorites = items.filter(i => i.isFavorite)
   const others = items.filter(i => !i.isFavorite)
 
   return (
-    <NavigationStack>
-      <List
-        navigationTitle="媒体库"
-        navigationBarTitleDisplayMode="large"
-        toolbar={buildPageToolbar(dismiss)}
-      >
-        <Section header={<Text textCase={null}>添加媒体</Text>}>
-          <TextField
-            title="标题（可选）"
-            value={titleInput}
-            onChanged={setTitleInput}
-            prompt="留空则自动从链接提取"
-          />
-          <TextField
-            title="视频地址"
-            value={urlInput}
-            onChanged={setUrlInput}
-            prompt="https://..."
-          />
-          <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
-          <Button
-            title={busy ? "选择中..." : "选择本地视频"}
-            systemImage="folder.badge.plus"
-            action={handlePickLocal}
-          />
-          {status ? (
-            <Text font="caption" foregroundStyle="secondaryLabel">
-              {status}
-            </Text>
-          ) : null}
-        </Section>
-
-        {favorites.length > 0 ? (
-          <Section header={<Text textCase={null}>收藏</Text>}>
-            {favorites.map(item => (
-              <MediaRow
-                key={item.id}
-                item={item}
-                onPlay={() => handlePlay(item)}
-                onDelete={() => handleDelete(item.id)}
-                onToggleFavorite={() => handleToggleFavorite(item.id)}
-              />
-            ))}
-          </Section>
+    <List navigationTitle="媒体库" navigationBarTitleDisplayMode="large">
+      <Section header={<Text textCase={null}>添加媒体</Text>}>
+        <TextField
+          title="标题（可选）"
+          value={titleInput}
+          onChanged={setTitleInput}
+          prompt="留空则自动提取；配置 TMDB 可刮削"
+        />
+        <TextField
+          title="视频地址"
+          value={urlInput}
+          onChanged={setUrlInput}
+          prompt="https://..."
+        />
+        <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
+        <Button
+          title={busy ? "选择中..." : "选择本地视频"}
+          systemImage="folder.badge.plus"
+          action={handlePickLocal}
+        />
+        <Button title="刷新远程源" systemImage="arrow.clockwise" action={refreshRemote} />
+        {status ? (
+          <Text font="caption" foregroundStyle="secondaryLabel">
+            {status}
+          </Text>
         ) : null}
+      </Section>
 
-        <Section
-          header={<Text textCase={null}>{items.length > 0 ? "全部媒体" : "暂无媒体"}</Text>}
-          footer={items.length === 0 ? "添加远程 URL 或本地视频后会显示在这里" : undefined}
-        >
-          {others.map(item => (
-            <MediaRow
+      {remote.length > 0 ? (
+        <Section header={<Text textCase={null}>远程源 ({remote.length})</Text>}>
+          {remote.map(item => (
+            <Button key={item.id} action={() => playRemote(item)}>
+              <HStack spacing={12} padding={{ vertical: 4 }}>
+                <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
+                  <Text fontWeight="medium" lineLimit={2}>
+                    {item.title}
+                  </Text>
+                  <Text font="caption" foregroundStyle="secondaryLabel">
+                    {item.sourceName}
+                  </Text>
+                </VStack>
+                <Text font="caption" foregroundStyle="secondaryLabel">
+                  播放
+                </Text>
+              </HStack>
+            </Button>
+          ))}
+        </Section>
+      ) : null}
+
+      {favorites.length > 0 ? (
+        <Section header={<Text textCase={null}>收藏</Text>}>
+          {favorites.map(item => (
+            <LocalRow
               key={item.id}
               item={item}
-              onPlay={() => handlePlay(item)}
+              onPlay={() => playLocal(item)}
               onDelete={() => handleDelete(item.id)}
-              onToggleFavorite={() => handleToggleFavorite(item.id)}
+              onToggleFavorite={() => {
+                toggleFavorite(item.id)
+                refreshLocal()
+              }}
             />
           ))}
         </Section>
-      </List>
-    </NavigationStack>
+      ) : null}
+
+      <Section
+        header={<Text textCase={null}>{items.length > 0 ? "本地媒体库" : "本地媒体库为空"}</Text>}
+        footer={items.length === 0 ? "添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源" : undefined}
+      >
+        {others.map(item => (
+          <LocalRow
+            key={item.id}
+            item={item}
+            onPlay={() => playLocal(item)}
+            onDelete={() => handleDelete(item.id)}
+            onToggleFavorite={() => {
+              toggleFavorite(item.id)
+              refreshLocal()
+            }}
+          />
+        ))}
+      </Section>
+    </List>
   )
 }
 
-function MediaRow({
+function LocalRow({
   item,
   onPlay,
   onDelete,
@@ -206,11 +305,6 @@ function MediaRow({
   onDelete: () => void
   onToggleFavorite: () => void
 }) {
-  const progressText =
-    item.playProgress && item.duration
-      ? `${formatTime(item.playProgress)} / ${formatTime(item.duration)}`
-      : item.sourceName || item.sourceType
-
   return (
     <HStack spacing={10} padding={{ vertical: 6 }}>
       <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
@@ -218,7 +312,7 @@ function MediaRow({
           {item.title}
         </Text>
         <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>
-          {progressText}
+          {item.sourceName || item.sourceType}
         </Text>
       </VStack>
       <Button title="播放" systemImage="play.fill" action={onPlay} />
@@ -239,13 +333,4 @@ function extractTitleFromUrl(url: string): string {
   } catch {
     return "未命名视频"
   }
-}
-
-function formatTime(seconds: number): string {
-  const s = Math.floor(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
-  return `${m}:${String(sec).padStart(2, "0")}`
 }

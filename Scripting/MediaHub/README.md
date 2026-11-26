@@ -1,33 +1,34 @@
 # MediaHub
 
 ## 用途
-全能媒体播放器基础框架（第一阶段）。提供原生 AVPlayer 播放、媒体库管理、搜索与设置，并预留 Emby / Plex / 115 / 脚本源扩展。
+全能媒体播放器。支持本地/直链、Emby、Plex、115 网盘、JS/Python 脚本源，以及 TMDB 标题刮削。
 
-## 当前功能（v0.1.2）
+## 功能（v0.2.0）
 - 底部 Tab：首页 / 媒体库 / 搜索 / 设置
-- 上滑自动收起 Tab（`tabBarMinimizeBehavior="onScrollDown"`）
-- 左上角关闭、右上角最小化（支持时）
-- 原生视频播放（AVPlayer + AVPlayerView + PiP）
-- 媒体库：远程 URL、本地文件、收藏、删除
-- 首页：继续观看 / 收藏 / 最近添加
-- 搜索：按标题、来源、链接过滤
-- 设置：播放偏好开关（原生 Toggle）
-
-## 首次使用
-1. 重新导入或更新脚本后运行。
-2. 到「媒体库」添加视频地址或选择本地文件。
-3. 在首页或媒体库点击播放。
-
-## 版本更新
-### 0.1.2
-- 修复空白页面：TextField / Toggle 官方属性名（onChanged、value、prompt）
-- Tab 改为：首页、媒体库、搜索、设置
-- 每个页面使用 NavigationStack + List
-- 顶部关闭 / 最小化；搜索 Tab role=search
+- 左上角关闭、右上角最小化（与 MoonTV 相同写法）
 - 上滑收起底部 Tab
+- 原生 AVPlayer 播放（PiP / Now Playing）
+- Emby：登录、最近列表、搜索、直链播放
+- Plex：Token 连接、最近添加、搜索、直链播放
+- 115：Cookie 校验、视频列表、取直链播放
+- 脚本源：远程/本地 JS（及 Python 若环境支持）
+- TMDB API Key 可选刮削
 
-### 0.1.1
-- Storage API 修正
+## 使用
+1. 更新/导入脚本后运行。
+2. 在「设置」配置 Emby / Plex / 115 Cookie / 脚本源 / TMDB Key。
+3. 在「媒体库」刷新远程源或添加本地/URL。
+4. 115 Cookie 可从本仓库「115获取Cookie」项目获取。
 
-### 0.1.0
-- 首个基础框架
+## 脚本源格式
+JS 示例：实现 `main(query)` 或 `getList(query)`，返回：
+```json
+{ "list": [{ "title": "片名", "url": "https://...", "poster": "https://..." }] }
+```
+
+## 版本
+### 0.2.0
+- 恢复关闭/最小化工具栏（NavigationStack + TabView Toolbar）
+- 接入 Emby / Plex / 115 / 脚本源 / TMDB
+### 0.1.x
+- 基础播放与媒体库

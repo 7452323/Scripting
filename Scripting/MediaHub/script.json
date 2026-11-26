@@ -1,0 +1,45 @@
+{
+  "entry" : "index.tsx",
+  "author" : {
+    "name" : "7452323",
+    "email" : "7452323@gmail.com",
+    "homepage" : "https://github.com/7452323"
+  },
+  "remoteResource" : null,
+  "contributors" : [
+
+  ],
+  "permissions" : null,
+  "localizedNames" : {
+    "de" : "",
+    "en" : "MediaHub",
+    "fr" : "",
+    "it" : "",
+    "ja" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "MediaHub",
+    "es" : ""
+  },
+  "description" : "全能媒体播放器基础框架。支持原生播放、媒体库管理，预留 Emby / Plex / 115 / 脚本源扩展。",
+  "runInApp" : false,
+  "name" : "MediaHub",
+  "localizedDescriptions" : {
+    "de" : "",
+    "en" : "Universal media player foundation with native playback and library management. Designed for future Emby, Plex, 115 and script sources.",
+    "fr" : "",
+    "it" : "",
+    "ja" : "",
+    "pt" : "",
+    "ru" : "",
+    "zh" : "全能媒体播放器基础框架。支持原生播放、媒体库管理，预留 Emby / Plex / 115 / 脚本源扩展。",
+    "es" : ""
+  },
+  "color" : "rgba(88, 86, 214, 1)",
+  "icon" : "play.rectangle.on.rectangle.fill",
+  "intentInputTypes" : [
+
+  ],
+  "version" : "0.1.0",
+  "iconImage" : null
+}

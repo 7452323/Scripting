@@ -1,4 +1,3 @@
-import { Storage } from "scripting"
 import type { MediaItem, PlaybackHistory } from "./types"
 
 const LIBRARY_KEY = "mediahub.library"
@@ -19,29 +18,38 @@ const defaultSettings: AppSettings = {
   defaultPlaybackRate: 1.0,
 }
 
-function safeParse<T>(raw: string | null, fallback: T): T {
-  if (!raw) return fallback
-  try {
-    return JSON.parse(raw) as T
-  } catch {
-    return fallback
+function safeParse<T>(raw: unknown, fallback: T): T {
+  if (raw == null) return fallback
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as T
+    } catch {
+      return fallback
+    }
   }
+  // Storage may already return parsed JSON objects
+  return raw as T
 }
 
 export function loadLibrary(): MediaItem[] {
-  return safeParse(Storage.getSync(LIBRARY_KEY), [])
+  try {
+    const raw = Storage.get<string | MediaItem[]>(LIBRARY_KEY)
+    const list = safeParse<MediaItem[]>(raw, [])
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
+  }
 }
 
 export function saveLibrary(items: MediaItem[]): void {
-  Storage.setSync(LIBRARY_KEY, JSON.stringify(items))
+  Storage.set(LIBRARY_KEY, JSON.stringify(items))
 }
 
 export function addMediaItem(item: Omit<MediaItem, "id" | "addedAt">): MediaItem {
   const library = loadLibrary()
   const existing = library.find(m => m.url === item.url)
-  if (existing) {
-    return existing
-  }
+  if (existing) return existing
+
   const newItem: MediaItem = {
     ...item,
     id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -61,8 +69,7 @@ export function updateMediaItem(id: string, patch: Partial<MediaItem>): void {
 }
 
 export function removeMediaItem(id: string): void {
-  const library = loadLibrary().filter(m => m.id !== id)
-  saveLibrary(library)
+  saveLibrary(loadLibrary().filter(m => m.id !== id))
 }
 
 export function toggleFavorite(id: string): void {
@@ -74,26 +81,36 @@ export function toggleFavorite(id: string): void {
 }
 
 export function loadHistory(): PlaybackHistory[] {
-  return safeParse(Storage.getSync(HISTORY_KEY), [])
+  try {
+    const raw = Storage.get<string | PlaybackHistory[]>(HISTORY_KEY)
+    const list = safeParse<PlaybackHistory[]>(raw, [])
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
+  }
 }
 
 export function addHistory(entry: PlaybackHistory): void {
   let history = loadHistory().filter(h => h.mediaId !== entry.mediaId)
   history.unshift(entry)
-  if (history.length > MAX_HISTORY) {
-    history = history.slice(0, MAX_HISTORY)
-  }
-  Storage.setSync(HISTORY_KEY, JSON.stringify(history))
+  if (history.length > MAX_HISTORY) history = history.slice(0, MAX_HISTORY)
+  Storage.set(HISTORY_KEY, JSON.stringify(history))
 }
 
 export function clearHistory(): void {
-  Storage.setSync(HISTORY_KEY, JSON.stringify([]))
+  Storage.set(HISTORY_KEY, JSON.stringify([]))
 }
 
 export function loadSettings(): AppSettings {
-  return { ...defaultSettings, ...safeParse(Storage.getSync(SETTINGS_KEY), {}) }
+  try {
+    const raw = Storage.get<string | AppSettings>(SETTINGS_KEY)
+    const parsed = safeParse<Partial<AppSettings>>(raw, {})
+    return { ...defaultSettings, ...parsed }
+  } catch {
+    return { ...defaultSettings }
+  }
 }
 
 export function saveSettings(settings: AppSettings): void {
-  Storage.setSync(SETTINGS_KEY, JSON.stringify(settings))
+  Storage.set(SETTINGS_KEY, JSON.stringify(settings))
 }

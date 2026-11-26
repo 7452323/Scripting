@@ -1,16 +1,14 @@
 import {
   Button,
-  Form,
+  Dialog,
+  DocumentPicker,
   HStack,
-  Image,
   List,
   Section,
   Text,
   TextField,
   VStack,
   useState,
-  DocumentPicker,
-  Dialog,
 } from "scripting"
 import type { MediaItem } from "../types"
 import {
@@ -18,7 +16,6 @@ import {
   loadLibrary,
   removeMediaItem,
   toggleFavorite,
-  updateMediaItem,
 } from "../storage"
 import { presentPlayer } from "../player"
 
@@ -26,17 +23,21 @@ export function LibraryPage() {
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
   const [urlInput, setUrlInput] = useState("")
   const [titleInput, setTitleInput] = useState("")
+  const [busy, setBusy] = useState(false)
 
   const refresh = () => setItems(loadLibrary())
 
-  const handleAddUrl = () => {
+  const handleAddUrl = async () => {
     const url = urlInput.trim()
     if (!url) {
-      Dialog.alert({ title: "提示", message: "请输入有效的视频地址" })
+      await Dialog.alert({ title: "提示", message: "请输入有效的视频地址" })
       return
     }
     if (!/^https?:\/\//i.test(url) && !url.startsWith("file://")) {
-      Dialog.alert({ title: "提示", message: "目前仅支持 http(s) 或 file:// 链接" })
+      await Dialog.alert({
+        title: "提示",
+        message: "目前仅支持 http(s) 或 file:// 链接",
+      })
       return
     }
 
@@ -52,51 +53,67 @@ export function LibraryPage() {
   }
 
   const handlePickLocal = async () => {
+    if (busy) return
+    setBusy(true)
     try {
-      const result = await DocumentPicker.pick({
-        type: ["public.movie", "public.video", "public.mpeg-4", "public.avi"],
-        allowMultiple: false,
+      const paths = await DocumentPicker.pickFiles({
+        types: ["public.movie", "public.video", "public.mpeg-4", "public.avi", "public.mpeg"],
+        allowsMultipleSelection: false,
+        shouldShowFileExtensions: true,
       })
-      if (!result || result.length === 0) return
-      const file = result[0]
-      const path = file.path || file.url
-      if (!path) return
+      if (!paths || paths.length === 0) return
 
+      const path = paths[0]
+      const fileUrl = path.startsWith("file://") ? path : `file://${path}`
       addMediaItem({
-        title: file.name || extractTitleFromUrl(path),
-        url: path.startsWith("file://") ? path : `file://${path}`,
+        title: extractTitleFromUrl(path),
+        url: fileUrl,
         sourceType: "local",
         sourceName: "本地文件",
       })
       refresh()
     } catch (e) {
       console.error("选择文件失败:", e)
+      await Dialog.alert({
+        title: "选择失败",
+        message: e instanceof Error ? e.message : "无法打开文件选择器",
+      })
+    } finally {
+      setBusy(false)
     }
   }
 
   const handlePlay = async (item: MediaItem) => {
-    await presentPlayer({
-      url: item.url,
-      title: item.title,
-      poster: item.poster,
-      mediaId: item.id,
-      startTime: item.playProgress,
-    })
-    refresh()
+    try {
+      await presentPlayer({
+        url: item.url,
+        title: item.title,
+        poster: item.poster,
+        mediaId: item.id,
+        startTime: item.playProgress,
+      })
+    } catch (e) {
+      console.error("播放失败:", e)
+      await Dialog.alert({
+        title: "播放失败",
+        message: e instanceof Error ? e.message : "无法播放该媒体",
+      })
+    } finally {
+      refresh()
+    }
   }
 
-  const handleDelete = (id: string) => {
-    Dialog.confirm({
+  const handleDelete = async (id: string) => {
+    const ok = await Dialog.confirm({
       title: "删除媒体",
       message: "确定要从媒体库中移除吗？",
-      confirmTitle: "删除",
-      cancelTitle: "取消",
-    }).then(ok => {
-      if (ok) {
-        removeMediaItem(id)
-        refresh()
-      }
+      confirmLabel: "删除",
+      cancelLabel: "取消",
     })
+    if (ok) {
+      removeMediaItem(id)
+      refresh()
+    }
   }
 
   const handleToggleFavorite = (id: string) => {
@@ -108,7 +125,10 @@ export function LibraryPage() {
   const others = items.filter(i => !i.isFavorite)
 
   return (
-    <List navigationTitle="媒体库">
+    <List
+      navigationTitle="媒体库"
+      navigationBarTitleDisplayMode="large"
+    >
       <Section header="添加媒体">
         <TextField
           title="标题（可选）"
@@ -120,13 +140,17 @@ export function LibraryPage() {
           title="视频地址"
           value={urlInput}
           onChange={setUrlInput}
-          placeholder="https://... 或选择本地文件"
+          placeholder="https://..."
         />
         <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
-        <Button title="选择本地视频" systemImage="folder.badge.plus" action={handlePickLocal} />
+        <Button
+          title={busy ? "选择中..." : "选择本地视频"}
+          systemImage="folder.badge.plus"
+          action={handlePickLocal}
+        />
       </Section>
 
-      {favorites.length > 0 && (
+      {favorites.length > 0 ? (
         <Section header="收藏">
           {favorites.map(item => (
             <MediaRow
@@ -138,22 +162,21 @@ export function LibraryPage() {
             />
           ))}
         </Section>
-      )}
+      ) : null}
 
-      <Section header={others.length > 0 ? "全部媒体" : "暂无媒体"}>
-        {others.length === 0 && favorites.length === 0 ? (
-          <Text foregroundStyle="secondary">添加远程 URL 或本地视频后会显示在这里</Text>
-        ) : (
-          others.map(item => (
-            <MediaRow
-              key={item.id}
-              item={item}
-              onPlay={() => handlePlay(item)}
-              onDelete={() => handleDelete(item.id)}
-              onToggleFavorite={() => handleToggleFavorite(item.id)}
-            />
-          ))
-        )}
+      <Section
+        header={items.length > 0 ? "全部媒体" : "暂无媒体"}
+        footer={items.length === 0 ? "添加远程 URL 或本地视频后会显示在这里" : undefined}
+      >
+        {others.map(item => (
+          <MediaRow
+            key={item.id}
+            item={item}
+            onPlay={() => handlePlay(item)}
+            onDelete={() => handleDelete(item.id)}
+            onToggleFavorite={() => handleToggleFavorite(item.id)}
+          />
+        ))}
       </Section>
     </List>
   )
@@ -176,28 +199,29 @@ function MediaRow({
       : item.sourceName || item.sourceType
 
   return (
-    <HStack spacing={12} padding={{ vertical: 4 }}>
-      <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
-        <Text font="body" fontWeight="medium" lineLimit={1}>
+    <HStack spacing={12} padding={{ vertical: 6 }}>
+      <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
+        <Text font="body" fontWeight="medium" lineLimit={2}>
           {item.title}
         </Text>
-        <Text font="caption" foregroundStyle="secondary" lineLimit={1}>
+        <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>
           {progressText}
         </Text>
       </VStack>
-      <Button systemImage="play.fill" action={onPlay} />
+      <Button title="播放" systemImage="play.fill" action={onPlay} />
       <Button
         systemImage={item.isFavorite ? "star.fill" : "star"}
         action={onToggleFavorite}
       />
-      <Button systemImage="trash" role="destructive" action={onDelete} />
+      <Button systemImage="trash" tint="systemRed" action={onDelete} />
     </HStack>
   )
 }
 
 function extractTitleFromUrl(url: string): string {
   try {
-    const name = decodeURIComponent(url.split("/").pop() || "")
+    const cleaned = url.replace(/^file:\/\//, "")
+    const name = decodeURIComponent(cleaned.split("/").pop() || "")
     return name.replace(/\.[a-z0-9]{2,5}$/i, "") || "未命名视频"
   } catch {
     return "未命名视频"
@@ -209,8 +233,6 @@ function formatTime(seconds: number): string {
   const h = Math.floor(s / 3600)
   const m = Math.floor((s % 3600) / 60)
   const sec = s % 60
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
-  }
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
   return `${m}:${String(sec).padStart(2, "0")}`
 }

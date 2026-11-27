@@ -1,6 +1,7 @@
 import {
   Button,
   List,
+  NavigationStack,
   Section,
   SecureField,
   Text,
@@ -9,6 +10,7 @@ import {
   VStack,
   useState,
 } from "scripting"
+import { pageToolbar } from "./chrome"
 import { loadSettings, saveSettings, type AppSettings } from "../storage"
 import {
   loadSourcesConfig,
@@ -20,7 +22,7 @@ import { embyLogin } from "../sources/emby"
 import { plexTest } from "../sources/plex"
 import { cloud115Check } from "../sources/cloud115"
 
-export function SettingsPage() {
+export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
   const [sources, setSources] = useState<SourcesConfig>(() => loadSourcesConfig())
   const [status, setStatus] = useState("")
@@ -115,7 +117,12 @@ export function SettingsPage() {
   }
 
   return (
-    <List navigationTitle="设置" navigationBarTitleDisplayMode="large">
+    <NavigationStack>
+      <List
+        navigationTitle="设置"
+        navigationBarTitleDisplayMode="large"
+        toolbar={pageToolbar(onClose)}
+      >
       <Section header={<Text textCase={null}>播放</Text>}>
         <Toggle
           title="记住播放进度"
@@ -129,7 +136,10 @@ export function SettingsPage() {
         />
       </Section>
 
-      <Section header={<Text textCase={null}>Emby</Text>} footer="填写服务器地址后点登录">
+      <Section
+        header={<Text textCase={null}>Emby</Text>}
+        footer={<Text font="caption">填写服务器地址后点登录</Text>}
+      >
         <Toggle
           title="启用 Emby"
           value={sources.emby.enabled}
@@ -161,7 +171,10 @@ export function SettingsPage() {
         ) : null}
       </Section>
 
-      <Section header={<Text textCase={null}>Plex</Text>} footer="使用 X-Plex-Token">
+      <Section
+        header={<Text textCase={null}>Plex</Text>}
+        footer={<Text font="caption">使用 X-Plex-Token</Text>}
+      >
         <Toggle
           title="启用 Plex"
           value={sources.plex.enabled}
@@ -184,7 +197,7 @@ export function SettingsPage() {
 
       <Section
         header={<Text textCase={null}>115 网盘</Text>}
-        footer="可从仓库「115获取Cookie」项目获取 Cookie 后粘贴"
+        footer={<Text font="caption">可从仓库「115获取Cookie」项目获取 Cookie 后粘贴</Text>}
       >
         <Toggle
           title="启用 115"
@@ -204,7 +217,11 @@ export function SettingsPage() {
 
       <Section
         header={<Text textCase={null}>脚本源</Text>}
-        footer="JS/JSON：返回 { list: [{ title, url, poster? }] }；示例见 samples/demo-source.js"
+        footer={
+          <Text font="caption">
+            {"JS/JSON：返回 { list: [{ title, url, poster? }] }；示例见 samples/demo-source.js"}
+          </Text>
+        }
       >
         <TextField
           title="名称"
@@ -252,12 +269,13 @@ export function SettingsPage() {
 
       <Section header={<Text textCase={null}>关于</Text>}>
         <VStack alignment="leading" spacing={6} padding={{ vertical: 8 }}>
-          <Text fontWeight="semibold">MediaHub 0.2.1</Text>
+          <Text fontWeight="semibold">MediaHub 0.2.2</Text>
           <Text font="subheadline" foregroundStyle="secondaryLabel">
             Emby / Plex / 115 / 脚本源 / TMDB。播放使用系统 AVPlayer，支持鉴权请求头。
           </Text>
         </VStack>
       </Section>
-    </List>
+      </List>
+    </NavigationStack>
   )
 }

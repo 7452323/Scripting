@@ -1,11 +1,9 @@
 import {
   AVPlayerView,
-  Button,
   Device,
-  Image,
   Navigation,
   PIPStatus,
-  Text,
+  ProgressView,
   VStack,
   ZStack,
   useEffect,
@@ -112,7 +110,7 @@ export async function presentPlayer(options: PlayerOptions): Promise<void> {
     scheduleCheckpoint()
 
     await Navigation.present({
-      element: <PlayerPage player={player} title={options.title || "正在播放"} />,
+      element: <PlayerPage player={player} />,
       modalPresentationStyle: "fullScreen",
     })
   } finally {
@@ -130,26 +128,25 @@ export async function presentPlayer(options: PlayerOptions): Promise<void> {
   }
 }
 
-function PlayerPage({
-  player,
-  title,
-}: {
-  player: AVPlayer
-  title: string
-}) {
-  const dismiss = Navigation.useDismiss()
+function PlayerPage({ player }: { player: AVPlayer }) {
   const pipStatus = useObservable<PIPStatus>()
-  const [showChrome, setShowChrome] = useState(true)
+  const [buffering, setBuffering] = useState(true)
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (player.currentTime > 0.2) setBuffering(false)
+    }, 400)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     Device.supportedInterfaceOrientations = ["allButUpsideDown"]
-    const timer = setTimeout(() => setShowChrome(false), 4000)
     return () => {
-      clearTimeout(timer)
       Device.supportedInterfaceOrientations = Device.userConfiguredInterfaceOrientations
     }
   }, [])
 
+  // 关闭完全交给 AVPlayerView 的原生控件，不再自绘任何按钮
   return (
     <ZStack
       frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
@@ -167,31 +164,9 @@ function PlayerPage({
         ignoresSafeArea
       />
 
-      {showChrome ? (
-        <VStack
-          frame={{ maxWidth: "infinity", maxHeight: "infinity" }}
-          padding={{ top: 12, horizontal: 12 }}
-          alignment="leading"
-        >
-          <Button
-            action={() => dismiss()}
-            buttonStyle="plain"
-            frame={{ width: 44, height: 44 }}
-            contentShape="rect"
-            accessibilityLabel="关闭播放"
-          >
-            <Image systemName="xmark.circle.fill" font="title2" foregroundStyle="white" />
-          </Button>
-          <Text
-            font="subheadline"
-            fontWeight="semibold"
-            foregroundStyle="white"
-            lineLimit={2}
-            padding={{ leading: 8, top: 4 }}
-          >
-            {title}
-          </Text>
-          <VStack frame={{ maxHeight: "infinity" }} />
+      {buffering ? (
+        <VStack allowsHitTesting={false}>
+          <ProgressView tint="white" />
         </VStack>
       ) : null}
     </ZStack>

@@ -2,12 +2,14 @@ import {
   Button,
   HStack,
   List,
+  NavigationStack,
   Section,
   Text,
   VStack,
   useEffect,
   useState,
 } from "scripting"
+import { pageToolbar } from "./chrome"
 import type { MediaItem, PlaybackHistory, RemoteMedia } from "../types"
 import { loadHistory, loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
@@ -15,7 +17,7 @@ import { loadSourcesConfig } from "../sources/config"
 import { embyListLatest } from "../sources/emby"
 import { plexListRecent } from "../sources/plex"
 
-export function HomePage() {
+export function HomePage({ onClose }: { onClose: () => void }) {
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
   const [history, setHistory] = useState<PlaybackHistory[]>(() => loadHistory())
   const [remotePreview, setRemotePreview] = useState<RemoteMedia[]>([])
@@ -64,10 +66,17 @@ export function HomePage() {
   }
 
   return (
-    <List navigationTitle="MediaHub" navigationBarTitleDisplayMode="large">
+    <NavigationStack>
+      <List
+        navigationTitle="MediaHub"
+        navigationBarTitleDisplayMode="large"
+        toolbar={pageToolbar(onClose)}
+      >
       <Section
         header={<Text textCase={null}>继续观看</Text>}
-        footer={recent.length === 0 ? "播放后会显示在这里" : undefined}
+        footer={
+          recent.length === 0 ? <Text font="caption">播放后会显示在这里</Text> : undefined
+        }
       >
         {recent.map(entry => (
           <Button
@@ -134,7 +143,9 @@ export function HomePage() {
 
       <Section
         header={<Text textCase={null}>收藏</Text>}
-        footer={favorites.length === 0 ? "在媒体库中点星标收藏" : undefined}
+        footer={
+          favorites.length === 0 ? <Text font="caption">在媒体库中点星标收藏</Text> : undefined
+        }
       >
         {favorites.map(item => (
           <Button
@@ -168,7 +179,9 @@ export function HomePage() {
 
       <Section
         header={<Text textCase={null}>最近添加</Text>}
-        footer={latest.length === 0 ? "去「媒体库」添加视频或配置源" : undefined}
+        footer={
+          latest.length === 0 ? <Text font="caption">去「媒体库」添加视频或配置源</Text> : undefined
+        }
       >
         {latest.map(item => (
           <Button
@@ -199,7 +212,8 @@ export function HomePage() {
           </Button>
         ))}
       </Section>
-    </List>
+      </List>
+    </NavigationStack>
   )
 }
 

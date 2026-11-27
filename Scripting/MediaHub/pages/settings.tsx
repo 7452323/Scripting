@@ -146,7 +146,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       setStatus(`已打开 Safari，请登录授权（代码 ${code}），返回后自动获取 Token…`)
       const token = await plexPollPin(pinId)
       savePlex({ token, enabled: true })
-      setStatus("Plex Safari 登录成功，Token 已保存。请填写服务器地址并点「连接/保存」。")
+      setStatus("Plex Safari 登录成功，Token 已保存。请填写服务器地址并点「连接 / 保存」。")
     } catch (e: any) {
       setStatus(e?.message || "Plex Safari 登录失败")
     }
@@ -220,8 +220,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 title="端口"
                 value={kind === "emby" ? sources.emby.port : sources.plex.port}
                 onChanged={v => {
-                  if (kind === "emby") saveEmby({ rembyPort: v } as any)
-                  // fix below
                   if (kind === "emby") saveEmby({ port: v })
                   else savePlex({ port: v })
                 }}

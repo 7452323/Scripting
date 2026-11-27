@@ -1,7 +1,8 @@
 import {
   Button,
+  Dialog,
+  DocumentPicker,
   HStack,
-  Image,
   List,
   NavigationStack,
   Section,
@@ -15,6 +16,7 @@ import { pageToolbar } from "./chrome"
 import type { MediaItem, RemoteMedia } from "../types"
 import {
   addMediaItem,
+  loadHistory,
   loadLibrary,
   removeMediaItem,
   toggleFavorite,
@@ -23,9 +25,15 @@ import { presentPlayer } from "../player"
 import { loadSourcesConfig } from "../sources/config"
 import { embyListLatest } from "../sources/emby"
 import { plexListRecent } from "../sources/plex"
-import { cloud115GetPlayUrl, cloud115ListVideos } from "../sources/cloud115"
+import {
+  cloud115GetPlayUrl,
+  cloud115ListVideos,
+  cloud115Space,
+  formatSpace,
+} from "../sources/cloud115"
 import { loadScriptSource } from "../sources/scriptSource"
 import { scrapeTMDB } from "../sources/scrape"
+import { saveSourcesConfig } from "../sources/config"
 
 export function LibraryPage({ onClose }: { onClose: () => void }) {
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
@@ -34,6 +42,7 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
   const [titleInput, setTitleInput] = useState("")
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState("")
+  const [spaceText, setSpaceText] = useState("")
 
   const refreshLocal = () => setItems(loadLibrary())
 
@@ -60,6 +69,13 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
     if (cfg.cloud115.enabled && cfg.cloud115.cookie) {
       try {
         all.push(...(await cloud115ListVideos(cfg.cloud115)))
+        try {
+          const sp = await cloud115Space(cfg.cloud115)
+          cfg.cloud115.spaceUsed = sp.used
+          cfg.cloud115.spaceTotal = sp.total
+          saveSourcesConfig(cfg)
+          setSpaceText(`${formatSpace(sp.used)}/${formatSpace(sp.total)}`)
+        } catch {}
       } catch (e: any) {
         errors.push(`115: ${e?.message || e}`)
       }
@@ -76,15 +92,21 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
     if (all.length) {
       setStatus(
         errors.length
-          ? `已加载 ${all.length} 条（部分源失败：${errors[0]}）`
-          : `已加载 ${all.length} 条远程媒体`
+          ? `远程 ${all.length} · ${errors[0]}`
+          : `远程 ${all.length} 条`
       )
     } else {
-      setStatus(errors[0] || "暂无远程媒体（请先在设置中配置源）")
+      setStatus(errors[0] || "暂无远程媒体")
     }
   }
 
   useEffect(() => {
+    const cfg = loadSourcesConfig()
+    if (cfg.cloud115.spaceTotal) {
+      setSpaceText(
+        `${formatSpace(cfg.cloud115.spaceUsed || 0)}/${formatSpace(cfg.cloud115.spaceTotal)}`
+      )
+    }
     refreshRemote().catch(() => {})
   }, [])
 
@@ -121,7 +143,7 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
     })
     setUrlInput("")
     setTitleInput("")
-    setStatus("已添加到媒体库")
+    setStatus("已添加到媒体库（首页将自动刷新）")
     refreshLocal()
   }
 
@@ -143,7 +165,7 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
         sourceType: "local",
         sourceName: "本地文件",
       })
-      setStatus("本地视频已添加")
+      setStatus("本地视频已添加（首页将自动刷新）")
       refreshLocal()
     } catch (e: any) {
       setStatus(e?.message || "选择失败")
@@ -173,7 +195,6 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
     try {
       let url = item.url
       let playHeaders = item.headers
-
       if (item.sourceType === "115") {
         const cfg = loadSourcesConfig()
         const pick = item.extra?.pickCode
@@ -182,9 +203,7 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
         url = got.url
         playHeaders = got.headers
       }
-
       if (!url) throw new Error("无播放地址")
-
       await presentPlayer({
         url,
         title: item.title,
@@ -212,6 +231,8 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
     }
   }
 
+  const history = loadHistory()
+  const lastMap = new Map(history.map(h => [h.mediaId, h.playedAt]))
   const favorites = items.filter(i => i.isFavorite)
   const others = items.filter(i => !i.isFavorite)
 
@@ -222,61 +243,88 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
         navigationBarTitleDisplayMode="large"
         toolbar={pageToolbar(onClose)}
       >
-      <Section header={<Text textCase={null}>添加媒体</Text>}>
-        <TextField
-          title="标题（可选）"
-          value={titleInput}
-          onChanged={setTitleInput}
-          prompt="留空则自动提取；配置 TMDB 可刮削"
-        />
-        <TextField
-          title="视频地址"
-          value={urlInput}
-          onChanged={setUrlInput}
-          prompt="https://..."
-        />
-        <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
-        <Button
-          title={busy ? "选择中..." : "选择本地视频"}
-          systemImage="folder.badge.plus"
-          action={handlePickLocal}
-        />
-        <Button title="刷新远程源" systemImage="arrow.clockwise" action={refreshRemote} />
-        {status ? (
-          <Text font="caption" foregroundStyle="secondaryLabel">
-            {status}
-          </Text>
-        ) : null}
-      </Section>
-
-      {remote.length > 0 ? (
-        <Section header={<Text textCase={null}>远程源 ({remote.length})</Text>}>
-          {remote.map(item => (
-            <Button key={item.id} action={() => playRemote(item)}>
-              <HStack spacing={12} padding={{ vertical: 4 }}>
-                <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
-                  <Text fontWeight="medium" lineLimit={2}>
-                    {item.title}
-                  </Text>
-                  <Text font="caption" foregroundStyle="secondaryLabel">
-                    {item.sourceName}
-                  </Text>
-                </VStack>
-                <Text font="caption" foregroundStyle="secondaryLabel">
-                  播放
-                </Text>
-              </HStack>
-            </Button>
-          ))}
+        <Section header={<Text textCase={null}>概览</Text>}>
+          <HStack spacing={10} padding={{ vertical: 4 }}>
+            <StatCard title="本地资源" value={`${items.length}`} />
+            <StatCard title="收藏" value={`${favorites.length}`} />
+          </HStack>
+          <HStack spacing={10} padding={{ vertical: 4 }}>
+            <StatCard title="远程" value={`${remote.length}`} />
+            <StatCard
+              title="115 空间"
+              value={spaceText || (loadSourcesConfig().cloud115.enabled ? "—" : "未启用")}
+            />
+          </HStack>
         </Section>
-      ) : null}
 
-      {favorites.length > 0 ? (
-        <Section header={<Text textCase={null}>收藏</Text>}>
-          {favorites.map(item => (
-            <LocalRow
+        <Section header={<Text textCase={null}>添加媒体</Text>}>
+          <TextField
+            title="标题（可选）"
+            value={titleInput}
+            onChanged={setTitleInput}
+            prompt="留空自动提取"
+          />
+          <TextField
+            title="视频地址"
+            value={urlInput}
+            onChanged={setUrlInput}
+            prompt="https://..."
+          />
+          <Button title="添加远程链接" systemImage="link.badge.plus" action={handleAddUrl} />
+          <Button
+            title={busy ? "选择中..." : "选择本地视频"}
+            systemImage="folder.badge.plus"
+            action={handlePickLocal}
+          />
+          <Button title="刷新远程源" systemImage="arrow.clockwise" action={refreshRemote} />
+          {status ? (
+            <Text font="caption" foregroundStyle="secondaryLabel">
+              {status}
+            </Text>
+          ) : null}
+        </Section>
+
+        {remote.length > 0 ? (
+          <Section header={<Text textCase={null}>远程源 ({remote.length})</Text>}>
+            {remote.map(item => (
+              <Button key={item.id} action={() => playRemote(item)}>
+                <MediaCard
+                  title={item.title}
+                  meta={item.sourceName}
+                  extra={item.extra?.size ? formatSpace(Number(item.extra.size)) : undefined}
+                />
+              </Button>
+            ))}
+          </Section>
+        ) : null}
+
+        {favorites.length > 0 ? (
+          <Section header={<Text textCase={null}>收藏</Text>}>
+            {favorites.map(item => (
+              <MediaCardRow
+                key={item.id}
+                item={item}
+                lastPlayed={lastMap.get(item.id) || item.lastPlayedAt}
+                onPlay={() => playLocal(item)}
+                onDelete={() => handleDelete(item.id)}
+                onToggleFavorite={() => {
+                  toggleFavorite(item.id)
+                  refreshLocal()
+                }}
+              />
+            ))}
+          </Section>
+        ) : null}
+
+        <Section
+          header={<Text textCase={null}>全部媒体 ({others.length})</Text>}
+          footer={items.length === 0 ? "添加 URL、本地文件或配置媒体源" : undefined}
+        >
+          {others.map(item => (
+            <MediaCardRow
               key={item.id}
               item={item}
+              lastPlayed={lastMap.get(item.id) || item.lastPlayedAt}
               onPlay={() => playLocal(item)}
               onDelete={() => handleDelete(item.id)}
               onToggleFavorite={() => {
@@ -286,63 +334,98 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
             />
           ))}
         </Section>
-      ) : null}
-
-      <Section
-        header={<Text textCase={null}>{items.length > 0 ? "本地媒体库" : "本地媒体库为空"}</Text>}
-        footer={
-          items.length === 0 ? (
-            <Text font="caption">添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源</Text>
-          ) : undefined
-        }
-      >
-        {others.map(item => (
-          <LocalRow
-            key={item.id}
-            item={item}
-            onPlay={() => playLocal(item)}
-            onDelete={() => handleDelete(item.id)}
-            onToggleFavorite={() => {
-              toggleFavorite(item.id)
-              refreshLocal()
-            }}
-          />
-        ))}
-      </Section>
       </List>
     </NavigationStack>
   )
 }
 
-function LocalRow({
+function StatCard({ title, value }: { title: string; value: string }) {
+  return (
+    <VStack
+      alignment="leading"
+      spacing={4}
+      padding={12}
+      frame={{ maxWidth: "infinity" }}
+      background="secondarySystemBackground"
+      clipShape={{ type: "rect", cornerRadius: 12, style: "continuous" }}
+    >
+      <Text font="caption" foregroundStyle="secondaryLabel">
+        {title}
+      </Text>
+      <Text fontWeight="bold" font="title3">
+        {value}
+      </Text>
+    </VStack>
+  )
+}
+
+function MediaCard({
+  title,
+  meta,
+  extra,
+}: {
+  title: string
+  meta: string
+  extra?: string
+}) {
+  return (
+    <VStack
+      alignment="leading"
+      spacing={4}
+      padding={12}
+      frame={{ maxWidth: "infinity" }}
+      background="secondarySystemBackground"
+      clipShape={{ type: "rect", cornerRadius: 12, style: "continuous" }}
+    >
+      <Text fontWeight="semibold" lineLimit={2}>
+        {title}
+      </Text>
+      <Text font="caption" foregroundStyle="secondaryLabel">
+        {meta}
+        {extra ? ` · ${extra}` : ""}
+      </Text>
+    </VStack>
+  )
+}
+
+function MediaCardRow({
   item,
+  lastPlayed,
   onPlay,
   onDelete,
   onToggleFavorite,
 }: {
   item: MediaItem
+  lastPlayed?: number
   onPlay: () => void
   onDelete: () => void
   onToggleFavorite: () => void
 }) {
   return (
-    <HStack spacing={10} padding={{ vertical: 6 }}>
-      <VStack alignment="leading" spacing={2} frame={{ maxWidth: "infinity" }}>
-        <Text fontWeight="medium" lineLimit={2}>
-          {item.title}
-        </Text>
-        <Text font="caption" foregroundStyle="secondaryLabel" lineLimit={1}>
-          {item.sourceName || item.sourceType}
-        </Text>
-      </VStack>
-      <Button title="播放" systemImage="play.fill" action={onPlay} />
-      <Button action={onToggleFavorite} accessibilityLabel="收藏">
-        <Image systemName={item.isFavorite ? "star.fill" : "star"} />
-      </Button>
-      <Button action={onDelete} accessibilityLabel="删除">
-        <Image systemName="trash" foregroundStyle="systemRed" />
-      </Button>
-    </HStack>
+    <VStack
+      alignment="leading"
+      spacing={8}
+      padding={12}
+      frame={{ maxWidth: "infinity" }}
+      background="secondarySystemBackground"
+      clipShape={{ type: "rect", cornerRadius: 12, style: "continuous" }}
+    >
+      <Text fontWeight="semibold" lineLimit={2}>
+        {item.title}
+      </Text>
+      <Text font="caption" foregroundStyle="secondaryLabel">
+        {item.sourceName || item.sourceType}
+        {lastPlayed ? ` · 上次 ${formatDate(lastPlayed)}` : " · 未播放"}
+      </Text>
+      <HStack spacing={10}>
+        <Button title="播放" systemImage="play.fill" action={onPlay} />
+        <Button
+          systemImage={item.isFavorite ? "star.fill" : "star"}
+          action={onToggleFavorite}
+        />
+        <Button systemImage="trash" foregroundStyle="systemRed" action={onDelete} />
+      </HStack>
+    </VStack>
   )
 }
 
@@ -354,4 +437,9 @@ function extractTitleFromUrl(url: string): string {
   } catch {
     return "未命名视频"
   }
+}
+
+function formatDate(ts: number): string {
+  const d = new Date(ts)
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
 }

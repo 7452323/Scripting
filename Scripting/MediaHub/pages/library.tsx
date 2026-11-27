@@ -1,8 +1,7 @@
 import {
   Button,
-  Dialog,
-  DocumentPicker,
   HStack,
+  Image,
   List,
   NavigationStack,
   Section,
@@ -16,11 +15,14 @@ import { pageToolbar } from "./chrome"
 import type { MediaItem, RemoteMedia } from "../types"
 import {
   addMediaItem,
+  loadFavoriteGroups,
   loadHistory,
   loadLibrary,
+  loadScrapeLibrary,
   removeMediaItem,
   toggleFavorite,
 } from "../storage"
+import { buildMediaGroups } from "../sources/mediaGroups"
 import { presentPlayer } from "../player"
 import { loadSourcesConfig } from "../sources/config"
 import { embyListLatest } from "../sources/emby"
@@ -32,6 +34,11 @@ import {
   formatSpace,
 } from "../sources/cloud115"
 import { loadScriptSource } from "../sources/scriptSource"
+import { Cloud115Page } from "./cloud115"
+import { ScrapePage } from "./scrape"
+import { presentDetail } from "./detail"
+import { findGroupOfEntry } from "../sources/mediaGroups"
+import { RemoteImage } from "../imageLoader"
 import { scrapeTMDB } from "../sources/scrape"
 import { saveSourcesConfig } from "../sources/config"
 
@@ -43,6 +50,9 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState("")
   const [spaceText, setSpaceText] = useState("")
+  const [showSheet, setShowSheet] = useState(false)
+  const [sheetMode, setSheetMode] = useState<"115" | "scrape">("115")
+  const [scraped, setScraped] = useState(() => loadScrapeLibrary())
 
   const refreshLocal = () => setItems(loadLibrary())
 
@@ -236,12 +246,29 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
   const favorites = items.filter(i => i.isFavorite)
   const others = items.filter(i => !i.isFavorite)
 
+  const favGroupKeys = new Set(loadFavoriteGroups())
+  const scrapeGroups = buildMediaGroups(scraped)
+  const favGroups = favGroupKeys.size === 0 ? [] : scrapeGroups.filter(g => favGroupKeys.has(g.key))
+
   return (
     <NavigationStack>
       <List
         navigationTitle="媒体库"
         navigationBarTitleDisplayMode="large"
         toolbar={pageToolbar(onClose)}
+        sheet={{
+          isPresented: showSheet,
+          onChanged: v => {
+            setShowSheet(v)
+            if (!v) setScraped(loadScrapeLibrary())
+          },
+          content:
+            sheetMode === "115" ? (
+              <Cloud115Page onClose={() => setShowSheet(false)} />
+            ) : (
+              <ScrapePage onClose={() => setShowSheet(false)} />
+            ),
+        }}
       >
         <Section header={<Text textCase={null}>概览</Text>}>
           <HStack spacing={10} padding={{ vertical: 4 }}>
@@ -255,6 +282,92 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
               value={spaceText || (loadSourcesConfig().cloud115.enabled ? "—" : "未启用")}
             />
           </HStack>
+        </Section>
+
+        {favGroups.length > 0 ? (
+          <Section header={<Text textCase={null}>收藏的影视 ({favGroups.length})</Text>}>
+            {favGroups.map(group => (
+              <Button
+                key={group.key}
+                action={async () => {
+                  await presentDetail(group)
+                  setScraped(loadScrapeLibrary())
+                }}
+              >
+                <HStack spacing={10} frame={{ maxWidth: "infinity" }} contentShape="rect">
+                  <VStack
+                    frame={{ width: 42, height: 62 }}
+                    clipShape={{ type: "rect", cornerRadius: 8, style: "continuous" }}
+                  >
+                    <RemoteImage url={group.poster} width={42} height={62} radius={8} />
+                  </VStack>
+                  <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
+                    <Text font="subheadline" fontWeight="medium" lineLimit={1}>
+                      {group.title}
+                    </Text>
+                    <Text font="caption2" foregroundStyle="secondaryLabel" lineLimit={1}>
+                      {[
+                        group.year,
+                        group.type === "series" ? `${group.episodeCount} 集` : group.category,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "已收藏"}
+                    </Text>
+                  </VStack>
+                  <Image systemName="chevron.right" font="caption" foregroundStyle="secondaryLabel" />
+                </HStack>
+              </Button>
+            ))}
+          </Section>
+        ) : null}
+
+        <Section header={<Text textCase={null}>刮削库 ({scrapeGroups.length})</Text>}>
+          {scrapeGroups.length === 0 ? (
+            <Text font="caption" foregroundStyle="secondaryLabel">
+              打开「115 网盘」进入一个文件夹，点「刮削此文件夹」即可生成海报墙。
+            </Text>
+          ) : (
+            scrapeGroups.slice(0, 12).map(group => (
+              <Button
+                key={group.key}
+                action={async () => {
+                  await presentDetail(group)
+                  setScraped(loadScrapeLibrary())
+                }}
+              >
+                <HStack spacing={10} frame={{ maxWidth: "infinity" }} contentShape="rect">
+                  <VStack
+                    frame={{ width: 42, height: 62 }}
+                    clipShape={{ type: "rect", cornerRadius: 8, style: "continuous" }}
+                  >
+                    <RemoteImage url={group.poster} width={42} height={62} radius={8} />
+                  </VStack>
+                  <VStack alignment="leading" spacing={3} frame={{ maxWidth: "infinity" }}>
+                    <Text font="subheadline" fontWeight="medium" lineLimit={1}>
+                      {group.title}
+                    </Text>
+                    <Text font="caption2" foregroundStyle="secondaryLabel" lineLimit={1}>
+                      {[
+                        group.year,
+                        group.type === "series" ? `${group.episodeCount} 集` : group.category,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "115"}
+                    </Text>
+                  </VStack>
+                  <Image systemName="chevron.right" font="caption" foregroundStyle="secondaryLabel" />
+                </HStack>
+              </Button>
+            ))
+          )}
+          <Button
+            title="管理刮削库"
+            systemImage="sparkles.tv"
+            action={() => {
+              setSheetMode("scrape")
+              setShowSheet(true)
+            }}
+          />
         </Section>
 
         <Section header={<Text textCase={null}>添加媒体</Text>}>
@@ -277,6 +390,22 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
             action={handlePickLocal}
           />
           <Button title="刷新远程源" systemImage="arrow.clockwise" action={refreshRemote} />
+          <Button
+            title="115 网盘"
+            systemImage="cloud.fill"
+            action={() => {
+              setSheetMode("115")
+              setShowSheet(true)
+            }}
+          />
+          <Button
+            title="海报刮削"
+            systemImage="sparkles.tv"
+            action={() => {
+              setSheetMode("scrape")
+              setShowSheet(true)
+            }}
+          />
           {status ? (
             <Text font="caption" foregroundStyle="secondaryLabel">
               {status}
@@ -318,7 +447,11 @@ export function LibraryPage({ onClose }: { onClose: () => void }) {
 
         <Section
           header={<Text textCase={null}>全部媒体 ({others.length})</Text>}
-          footer={items.length === 0 ? "添加 URL、本地文件或配置媒体源" : undefined}
+          footer={
+            items.length === 0 ? (
+              <Text font="caption">添加 URL、本地文件或配置媒体源</Text>
+            ) : undefined
+          }
         >
           {others.map(item => (
             <MediaCardRow
@@ -420,10 +553,16 @@ function MediaCardRow({
       <HStack spacing={10}>
         <Button title="播放" systemImage="play.fill" action={onPlay} />
         <Button
+          title={item.isFavorite ? "取消收藏" : "收藏"}
           systemImage={item.isFavorite ? "star.fill" : "star"}
           action={onToggleFavorite}
         />
-        <Button systemImage="trash" foregroundStyle="systemRed" action={onDelete} />
+        <Button
+          title="删除"
+          systemImage="trash"
+          foregroundStyle="systemRed"
+          action={onDelete}
+        />
       </HStack>
     </VStack>
   )

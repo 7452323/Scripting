@@ -58,3 +58,31 @@ export interface RemoteMedia {
   headers?: Record<string, string>
   extra?: Record<string, any>
 }
+
+/** 首页卡片（Emby / Plex / 115 通用） */
+export interface HomeCard {
+  id: string
+  title: string
+  subtitle: string
+  poster?: string
+  backdrop?: string
+  url: string
+  headers: Record<string, string>
+  /** 0~1 */
+  progress: number
+  positionSeconds: number
+  durationSeconds: number
+  kind: "movie" | "episode" | "series"
+  /** 115 播放用 pickCode */
+  pickCode?: string
+  /** 影视分组 key（点卡片进详情页而不是直接播） */
+  groupKey?: string
+}
+
+/** 首页分栏 */
+export interface HomeShelf {
+  key: string
+  title: string
+  cards: HomeCard[]
+  landscape: boolean
+}

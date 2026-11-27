@@ -1,3 +1,4 @@
+import { fetch } from "scripting"
 import type { Cloud115Config } from "./config"
 import type { RemoteMedia } from "../types"
 

@@ -1,4 +1,5 @@
 /** 简易刮削：TMDB 搜索标题信息 */
+import { fetch } from "scripting"
 
 export interface ScrapeResult {
   title: string

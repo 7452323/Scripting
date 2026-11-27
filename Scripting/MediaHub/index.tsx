@@ -11,7 +11,8 @@ async function main() {
   try {
     await Navigation.present({
       element: <MainPage />,
-      modalPresentationStyle: "overFullScreen",
+      modalPresentationStyle: "fullScreen",
+      swipeBackBehavior: "minimize",
     })
   } catch (error) {
     console.error("MediaHub 启动失败:", error)

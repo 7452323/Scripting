@@ -11,7 +11,6 @@ import {
   useEffect,
   useObservable,
   useState,
-  SharedAudioSession,
 } from "scripting"
 import type { PlayerOptions } from "./types"
 import { addHistory, loadSettings, updateMediaItem } from "./storage"

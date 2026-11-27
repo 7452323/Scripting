@@ -2,6 +2,7 @@ import {
   Button,
   HStack,
   List,
+  NavigationStack,
   Section,
   Text,
   TextField,
@@ -9,6 +10,7 @@ import {
   useMemo,
   useState,
 } from "scripting"
+import { pageToolbar } from "./chrome"
 import type { MediaItem, RemoteMedia } from "../types"
 import { loadLibrary } from "../storage"
 import { presentPlayer } from "../player"
@@ -18,7 +20,7 @@ import { plexSearch } from "../sources/plex"
 import { loadScriptSource } from "../sources/scriptSource"
 import { cloud115GetPlayUrl } from "../sources/cloud115"
 
-export function SearchPage() {
+export function SearchPage({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("")
   const [library, setLibrary] = useState<MediaItem[]>(() => loadLibrary())
   const [remote, setRemote] = useState<RemoteMedia[]>([])
@@ -115,7 +117,12 @@ export function SearchPage() {
   }
 
   return (
-    <List navigationTitle="搜索" navigationBarTitleDisplayMode="large">
+    <NavigationStack>
+      <List
+        navigationTitle="搜索"
+        navigationBarTitleDisplayMode="large"
+        toolbar={pageToolbar(onClose)}
+      >
       <Section header={<Text textCase={null}>关键词</Text>}>
         <TextField
           title="搜索"
@@ -174,6 +181,7 @@ export function SearchPage() {
           </Button>
         ))}
       </Section>
-    </List>
+      </List>
+    </NavigationStack>
   )
 }

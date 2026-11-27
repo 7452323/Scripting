@@ -1,3 +1,4 @@
+import { fetch } from "scripting"
 import type { EmbyConfig } from "./config"
 import type { RemoteMedia } from "../types"
 

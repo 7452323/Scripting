@@ -2,6 +2,9 @@
 
 export type UrlScheme = "http" | "https"
 
+/** 首页展示哪个媒体库 */
+export type HomeSource = "emby" | "plex" | "115"
+
 export interface EmbyConfig {
   enabled: boolean
   scheme: UrlScheme
@@ -46,9 +49,13 @@ export interface SourcesConfig {
   cloud115: Cloud115Config
   scripts: ScriptSourceConfig[]
   tmdbApiKey: string
+  /** 首页当前展示的媒体库（长按首页可切换） */
+  homeSource: HomeSource
 }
 
 const KEY = "mediahub.sources"
+/** 115 Cookie 单独存一份：任何「整体写回配置」都不会把登录态抹掉 */
+const COOKIE_KEY = "mediahub.115.cookie"
 
 const defaults: SourcesConfig = {
   emby: {
@@ -71,6 +78,7 @@ const defaults: SourcesConfig = {
   cloud115: { enabled: false, cookie: "" },
   scripts: [],
   tmdbApiKey: "",
+  homeSource: "emby",
 }
 
 export function buildServerUrl(scheme: UrlScheme, host: string, port: string): string {
@@ -133,6 +141,7 @@ function parse(raw: unknown): SourcesConfig {
       cloud115: { ...defaults.cloud115 },
       scripts: [],
       tmdbApiKey: "",
+      homeSource: "emby",
     }
   }
   let obj: any = raw
@@ -149,20 +158,59 @@ function parse(raw: unknown): SourcesConfig {
     cloud115: { ...defaults.cloud115, ...(obj.cloud115 || {}) },
     scripts: Array.isArray(obj.scripts) ? obj.scripts : [],
     tmdbApiKey: obj.tmdbApiKey || "",
+    homeSource:
+      obj.homeSource === "plex" || obj.homeSource === "115" ? obj.homeSource : "emby",
   }
 }
 
 export function loadSourcesConfig(): SourcesConfig {
+  let cfg: SourcesConfig
   try {
-    return parse(Storage.get(KEY))
+    cfg = parse(Storage.get(KEY))
   } catch {
-    return parse(null)
+    cfg = parse(null)
   }
+  // Cookie 以独立 key 为准（非空时优先）
+  try {
+    const saved = Storage.get<string>(COOKIE_KEY)
+    if (typeof saved === "string" && saved.trim()) {
+      cfg.cloud115.cookie = saved.trim()
+      if (!cfg.cloud115.enabled) cfg.cloud115.enabled = true
+    }
+  } catch {}
+  return cfg
 }
 
 export function saveSourcesConfig(config: SourcesConfig): void {
   // 保存前同步 server 字段
   config.emby.server = buildServerUrl(config.emby.scheme, config.emby.host, config.emby.port)
   config.plex.server = buildServerUrl(config.plex.scheme, config.plex.host, config.plex.port)
+
+  const cookie = (config.cloud115?.cookie || "").trim()
+  if (cookie) {
+    try {
+      Storage.set(COOKIE_KEY, cookie)
+    } catch {}
+  } else {
+    // 本次写入没带 Cookie（比如只改了空间缓存/首页来源）：把已存的补回来，绝不抹掉登录态
+    try {
+      const saved = Storage.get<string>(COOKIE_KEY)
+      if (typeof saved === "string" && saved.trim()) config.cloud115.cookie = saved.trim()
+    } catch {}
+  }
+
   Storage.set(KEY, JSON.stringify(config))
+}
+
+/** 显式退出 115 登录（只有这里会真的清掉 Cookie） */
+export function clearCloud115Cookie(): void {
+  try {
+    Storage.remove(COOKIE_KEY)
+  } catch {}
+  const cfg = loadSourcesConfig()
+  cfg.cloud115.cookie = ""
+  cfg.cloud115.enabled = false
+  cfg.cloud115.spaceUsed = 0
+  cfg.cloud115.spaceTotal = 0
+  Storage.set(KEY, JSON.stringify(cfg))
 }

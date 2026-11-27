@@ -1,26 +1,35 @@
 {
-  "entry": "index.tsx",
-  "author": {
-    "name": "7452323",
-    "email": "7452323@gmail.com",
-    "homepage": "https://github.com/7452323"
+  "description" : "全能媒体播放器：Emby \/ Plex \/ 115 \/ 脚本源",
+  "color" : "rgba(88, 86, 214, 1)",
+  "iconImage" : null,
+  "entry" : "index.tsx",
+  "name" : "MediaHub",
+  "runInApp" : false,
+  "localizedNames" : {
+    "zh" : "MediaHub",
+    "en" : "MediaHub"
   },
-  "remoteResource": null,
-  "contributors": [],
-  "permissions": null,
-  "localizedNames": {
-    "en": "MediaHub",
-    "zh": "MediaHub"
+  "remoteResource" : {
+    "autoUpdateInterval" : null,
+    "hash" : "fd3aa3c682585eb3f5626d6a486645cc",
+    "url" : "https:\/\/github.com\/7452323\/Scripting\/tree\/main\/Scripting\/MediaHub"
   },
-  "description": "全能媒体播放器：Emby / Plex / 115 / 脚本源",
-  "runInApp": false,
-  "name": "MediaHub",
-  "localizedDescriptions": {
-    "zh": "统一添加源、Safari 登录 Plex、卡片媒体库与首页"
+  "localizedDescriptions" : {
+    "zh" : "统一添加源、Safari 登录 Plex、卡片媒体库与首页"
   },
-  "color": "rgba(88, 86, 214, 1)",
-  "icon": "play.rectangle.on.rectangle.fill",
-  "intentInputTypes": [],
-  "version": "0.3.0",
-  "iconImage": null
+  "author" : {
+    "email" : "7452323@gmail.com",
+    "homepage" : "https:\/\/github.com\/7452323",
+    "name" : "7452323"
+  },
+  "permissions" : null,
+  "icon" : "play.rectangle.on.rectangle.fill",
+  "intentInputTypes" : [
+
+  ],
+  "version" : "0.12.3",
+  "remoteDefinitionId" : null,
+  "contributors" : [
+
+  ]
 }

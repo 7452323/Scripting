@@ -30,6 +30,12 @@ https://raw.githubusercontent.com/7452323/Scripting/main/Scripting/MediaHub/samp
 ```
 
 ## 版本
+### 0.2.2
+- 修复：各页面空白（Section 头部/尾部传了字符串，整页构建失败）
+- 修复：页面标题不显示（TabView 内每页独立 NavigationStack）
+- 修复：Dialog / DocumentPicker / SharedAudioSession 误从 scripting 导入导致运行时未定义
+- 修复：各源文件未导入 fetch，请求时会抛错
+- 优化：关闭与最小化按钮下沉到页面工具栏，全面屏呈现 + 下滑最小化
 ### 0.2.1
 - 代码质量：统一 RemoteMedia、播放鉴权头、Emby/Plex 可播过滤
 - 115 播放带 Cookie；设置敏感项 SecureField

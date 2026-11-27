@@ -3,6 +3,7 @@ import type { MediaItem, PlaybackHistory } from "./types"
 const LIBRARY_KEY = "mediahub.library"
 const HISTORY_KEY = "mediahub.history"
 const SETTINGS_KEY = "mediahub.settings"
+const LIBRARY_REV_KEY = "mediahub.library.rev"
 
 const MAX_HISTORY = 80
 
@@ -27,8 +28,22 @@ function safeParse<T>(raw: unknown, fallback: T): T {
       return fallback
     }
   }
-  // Storage may already return parsed JSON objects
   return raw as T
+}
+
+export function getLibraryRevision(): number {
+  try {
+    const v = Storage.get<number | string>(LIBRARY_REV_KEY)
+    if (typeof v === "number") return v
+    if (typeof v === "string") return Number(v) || 0
+    return 0
+  } catch {
+    return 0
+  }
+}
+
+function bumpLibraryRevision() {
+  Storage.set(LIBRARY_REV_KEY, Date.now())
 }
 
 export function loadLibrary(): MediaItem[] {
@@ -43,6 +58,7 @@ export function loadLibrary(): MediaItem[] {
 
 export function saveLibrary(items: MediaItem[]): void {
   Storage.set(LIBRARY_KEY, JSON.stringify(items))
+  bumpLibraryRevision()
 }
 
 export function addMediaItem(item: Omit<MediaItem, "id" | "addedAt">): MediaItem {
@@ -95,10 +111,12 @@ export function addHistory(entry: PlaybackHistory): void {
   history.unshift(entry)
   if (history.length > MAX_HISTORY) history = history.slice(0, MAX_HISTORY)
   Storage.set(HISTORY_KEY, JSON.stringify(history))
+  bumpLibraryRevision()
 }
 
 export function clearHistory(): void {
   Storage.set(HISTORY_KEY, JSON.stringify([]))
+  bumpLibraryRevision()
 }
 
 export function loadSettings(): AppSettings {

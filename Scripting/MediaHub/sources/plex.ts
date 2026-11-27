@@ -1,26 +1,37 @@
 import { fetch } from "scripting"
 import type { PlexConfig } from "./config"
+import { buildServerUrl } from "./config"
 import type { RemoteMedia } from "../types"
 
+const CLIENT_ID = "mediahub-ios-scripting"
+const PRODUCT = "MediaHub"
+const VERSION = "0.3.0"
+
 function base(server: string) {
-  return server.replace(/\/$/, "")
+  return (server || "").replace(/\/$/, "")
 }
 
-function headers(token: string) {
-  return {
+function ensureServer(config: PlexConfig): string {
+  if (config.server) return base(config.server)
+  return base(buildServerUrl(config.scheme || "http", config.host || "", config.port || "32400"))
+}
+
+function headers(token?: string) {
+  const h: Record<string, string> = {
     Accept: "application/json",
-    "X-Plex-Token": token,
-    "X-Plex-Client-Identifier": "mediahub-ios",
-    "X-Plex-Product": "MediaHub",
-    "X-Plex-Version": "0.2.1",
+    "X-Plex-Client-Identifier": CLIENT_ID,
+    "X-Plex-Product": PRODUCT,
+    "X-Plex-Version": VERSION,
+    "X-Plex-Device": "iOS",
+    "X-Plex-Platform": "iOS",
   }
+  if (token) h["X-Plex-Token"] = token
+  return h
 }
 
 function toPlayable(server: string, token: string, item: any): RemoteMedia | null {
   const ratingKey = String(item.ratingKey || "")
   if (!ratingKey) return null
-
-  // 仅 movie / episode 有 Part
   const part = item.Media?.[0]?.Part?.[0]
   if (!part?.key) return null
 
@@ -45,9 +56,65 @@ function toPlayable(server: string, token: string, item: any): RemoteMedia | nul
   }
 }
 
+/** Safari 登录：创建 PIN 并返回授权页 URL */
+export async function plexStartSafariLogin(): Promise<{ pinId: number; code: string; authUrl: string }> {
+  const res = await fetch("https://plex.tv/api/v2/pins?strong=true", {
+    method: "POST",
+    headers: {
+      ...headers(),
+      "Content-Type": "application/json",
+    },
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(`创建 Plex PIN 失败 (${res.status}): ${t.slice(0, 120)}`)
+  }
+  const data = await res.json()
+  const pinId = data.id
+  const code = data.code
+  if (!pinId || !code) throw new Error("Plex PIN 响应无效")
+
+  const authUrl =
+    `https://app.plex.tv/auth#?clientID=${encodeURIComponent(CLIENT_ID)}` +
+    `&code=${encodeURIComponent(code)}` +
+    `&context%5Bdevice%5D%5Bproduct%5D=${encodeURIComponent(PRODUCT)}`
+
+  // 打开 Safari
+  try {
+    const S: any = (globalThis as any).Safari
+    if (S?.open) await S.open(authUrl)
+    else if (S?.openURL) await S.openURL(authUrl)
+    else if (typeof (globalThis as any).openURL === "function") {
+      await (globalThis as any).openURL(authUrl)
+    }
+  } catch (e) {
+    console.warn("打开 Safari 失败，请手动打开授权链接", e)
+  }
+
+  return { pinId, code, authUrl }
+}
+
+/** 轮询 PIN，成功返回 token */
+export async function plexPollPin(pinId: number, maxAttempts = 30): Promise<string> {
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(2000)
+    const res = await fetch(`https://plex.tv/api/v2/pins/${pinId}`, {
+      headers: headers(),
+    })
+    if (!res.ok) continue
+    const data = await res.json()
+    if (data.authToken) return data.authToken as string
+  }
+  throw new Error("等待 Plex 授权超时，请在 Safari 完成登录后重试")
+}
+
+function sleep(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms))
+}
+
 export async function plexTest(config: PlexConfig): Promise<string> {
-  const server = base(config.server)
-  if (!server || !config.token) throw new Error("请填写 Plex 服务器与 Token")
+  const server = ensureServer(config)
+  if (!server || !config.token) throw new Error("请先完成 Plex 登录并填写服务器")
   const res = await fetch(`${server}/identity`, { headers: headers(config.token) })
   if (!res.ok) throw new Error(`Plex 连接失败 (${res.status})`)
   const data = await res.json()
@@ -55,7 +122,7 @@ export async function plexTest(config: PlexConfig): Promise<string> {
 }
 
 export async function plexListRecent(config: PlexConfig, limit = 30): Promise<RemoteMedia[]> {
-  const server = base(config.server)
+  const server = ensureServer(config)
   if (!server || !config.token) throw new Error("请先配置 Plex")
 
   const res = await fetch(
@@ -72,16 +139,14 @@ export async function plexListRecent(config: PlexConfig, limit = 30): Promise<Re
 }
 
 export async function plexSearch(config: PlexConfig, query: string): Promise<RemoteMedia[]> {
-  const server = base(config.server)
+  const server = ensureServer(config)
   if (!server || !config.token) throw new Error("请先配置 Plex")
 
-  // type 1=movie 4=episode
   const res = await fetch(
     `${server}/hubs/search?query=${encodeURIComponent(query)}&limit=20`,
     { headers: headers(config.token) }
   )
 
-  // 部分服务器仅支持 /search
   let items: any[] = []
   if (res.ok) {
     const data = await res.json()

@@ -1,9 +1,9 @@
 import {
   Button,
-  Dialog,
-  DocumentPicker,
   HStack,
+  Image,
   List,
+  NavigationStack,
   Section,
   Text,
   TextField,
@@ -11,6 +11,7 @@ import {
   useEffect,
   useState,
 } from "scripting"
+import { pageToolbar } from "./chrome"
 import type { MediaItem, RemoteMedia } from "../types"
 import {
   addMediaItem,
@@ -26,7 +27,7 @@ import { cloud115GetPlayUrl, cloud115ListVideos } from "../sources/cloud115"
 import { loadScriptSource } from "../sources/scriptSource"
 import { scrapeTMDB } from "../sources/scrape"
 
-export function LibraryPage() {
+export function LibraryPage({ onClose }: { onClose: () => void }) {
   const [items, setItems] = useState<MediaItem[]>(() => loadLibrary())
   const [remote, setRemote] = useState<RemoteMedia[]>([])
   const [urlInput, setUrlInput] = useState("")
@@ -215,7 +216,12 @@ export function LibraryPage() {
   const others = items.filter(i => !i.isFavorite)
 
   return (
-    <List navigationTitle="媒体库" navigationBarTitleDisplayMode="large">
+    <NavigationStack>
+      <List
+        navigationTitle="媒体库"
+        navigationBarTitleDisplayMode="large"
+        toolbar={pageToolbar(onClose)}
+      >
       <Section header={<Text textCase={null}>添加媒体</Text>}>
         <TextField
           title="标题（可选）"
@@ -285,9 +291,9 @@ export function LibraryPage() {
       <Section
         header={<Text textCase={null}>{items.length > 0 ? "本地媒体库" : "本地媒体库为空"}</Text>}
         footer={
-          items.length === 0
-            ? "添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源"
-            : undefined
+          items.length === 0 ? (
+            <Text font="caption">添加 URL、本地文件，或在设置中配置 Emby/Plex/115/脚本源</Text>
+          ) : undefined
         }
       >
         {others.map(item => (
@@ -303,7 +309,8 @@ export function LibraryPage() {
           />
         ))}
       </Section>
-    </List>
+      </List>
+    </NavigationStack>
   )
 }
 
@@ -329,11 +336,12 @@ function LocalRow({
         </Text>
       </VStack>
       <Button title="播放" systemImage="play.fill" action={onPlay} />
-      <Button
-        systemImage={item.isFavorite ? "star.fill" : "star"}
-        action={onToggleFavorite}
-      />
-      <Button systemImage="trash" foregroundStyle="systemRed" action={onDelete} />
+      <Button action={onToggleFavorite} accessibilityLabel="收藏">
+        <Image systemName={item.isFavorite ? "star.fill" : "star"} />
+      </Button>
+      <Button action={onDelete} accessibilityLabel="删除">
+        <Image systemName="trash" foregroundStyle="systemRed" />
+      </Button>
     </HStack>
   )
 }
